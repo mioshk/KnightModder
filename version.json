@@ -1,1 +1,7 @@
-
+{
+  "version": "1.2.0",
+  "release_date": "2026-07-22",
+  "changelog": "✨ 新增在线模组页面\n🐛 修复禁用模组功能\n🚀 优化加载速度",
+  "quark_link": "https://pan.quark.cn/s/xxxxxxxx",
+  "quark_qr_code": "https://cdn.jsdelivr.net/gh/mioshk/HKModMate@main/qrcode.png"
+}
