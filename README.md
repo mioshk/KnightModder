@@ -3,7 +3,8 @@
 **空洞骑士·骑士模组师**
 
 
-作者：[MioSs-](https://space.bilibili.com/538844794)
+- 作者：[MioSs-](https://space.bilibili.com/538844794)
+- [联系我](https://docs.qq.com/aio/DU2VHWGF0R2NtUWRI)
 
 *让每一位骑士都能轻松享受 Mod 的乐趣*
 
@@ -48,17 +49,6 @@
 
 ---
 
-## 📦 如何使用？
-
-1. **选择游戏路径** → 指向你的 `hollow_knight.exe`
-2. **安装 API** → 一键注入 Modding API
-3. **浏览在线模组** → 找到想要的 Mod，复制夸克链接
-4. **下载 Mod** → 夸克网盘自动跳出转存链接，转存后下载
-5. **安装 Mod** → 拖入下载好的.zip或.dll，自动安装
-6. **享受游戏** → 启动游戏，Mod 已生效
-
----
-
 
 ## 📌 注意事项
 
@@ -71,7 +61,3 @@
 ## 🙏 致谢
 
 感谢所有 Mod 作者与 Hollow Knight 社区
-
----
-
-*愿你的骑士之旅一路顺畅 ⚔️*
