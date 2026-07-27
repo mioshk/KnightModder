@@ -1,8 +1,7 @@
 {
-  "version": "1.2.0",
-  "release_date": "2026-07-22",
-  "changelog": "✨ 新增在线模组页面\n🐛 修复禁用模组功能\n🚀 优化加载速度",
-  "quark_link": "https://pan.quark.cn/s/3d3e0fb1b1c3",
+  "version": "1.3.0",
+  "release_date": "2026-07-28",
+  "changelog": "✨ 优化整体 UI 显示\n✨ 新增停止游戏按钮状态，解决与 Steam 启动游戏的冲突\n✨ 本地模组支持多选操作，可批量管理更省心",
+  "quark_link": "https://pan.quark.cn/s/033d87a393ee",
   "quark_qr_code": "https://cdn.jsdelivr.net/gh/mioshk/HKModMate@main/qrcode.png"
 }
-
