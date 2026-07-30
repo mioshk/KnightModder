@@ -1,7 +1,7 @@
 {
-  "version": "1.3.0",
-  "release_date": "2026-07-28",
-  "changelog": "✨ 优化整体 UI 显示\n✨ 新增停止游戏按钮状态，解决与 Steam 启动游戏的冲突\n✨ 本地模组支持多选操作，可批量管理更省心",
+  "version": "1.3.1",
+  "release_date": "2026-07-30",
+  "changelog": "✨ 去掉了模组复制链接后的成功提示的弹窗，使夸克网盘识别能力提升",
   "quark_link": "https://pan.quark.cn/s/033d87a393ee",
   "quark_qr_code": "https://cdn.jsdelivr.net/gh/mioshk/HKModMate@main/qrcode.png"
 }
