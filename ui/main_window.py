@@ -613,7 +613,7 @@ class MainWindow(QMainWindow):
     def _hit_edge(self, pos):
         """返回鼠标所在的窗口边缘（用于 resize），不在边缘则返回 None"""
         b = self._BORDER
-        w, h = self._outer.width(), self._outer.height()
+        w, h = self.width(), self.height()
         on_left = pos.x() <= b
         on_right = pos.x() >= w - b
         on_top = pos.y() <= b
@@ -643,7 +643,8 @@ class MainWindow(QMainWindow):
 
         t = event.type()
         if t == event.Type.MouseMove:
-            edge = self._hit_edge(event.position().toPoint())
+            pos = self.mapFromGlobal(event.globalPosition().toPoint())
+            edge = self._hit_edge(pos)
             cursor = {
                 Qt.TopEdge | Qt.LeftEdge: Qt.SizeFDiagCursor,
                 Qt.BottomEdge | Qt.RightEdge: Qt.SizeFDiagCursor,
@@ -654,7 +655,7 @@ class MainWindow(QMainWindow):
                 Qt.TopEdge: Qt.SizeVerCursor,
                 Qt.BottomEdge: Qt.SizeVerCursor,
             }
-            self._outer.setCursor(cursor.get(edge, Qt.ArrowCursor))
+            self.setCursor(cursor.get(edge, Qt.ArrowCursor))
             self._resize_edge = edge
         elif t == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
             if self._resize_edge is not None:
@@ -663,7 +664,7 @@ class MainWindow(QMainWindow):
                     wh.startSystemResize(self._resize_edge)
                 return True
         elif t == event.Type.Leave:
-            self._outer.setCursor(Qt.ArrowCursor)
+            self.setCursor(Qt.ArrowCursor)
             self._resize_edge = None
 
         return super().eventFilter(obj, event)
