@@ -1,39 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-工具函数包
-包含路径处理、系统检测、游戏查找等通用工具
+utils 包 - 通用工具模块
 """
-from utils.path_utils import (
+
+from utils.common import (
+    get_system_type,
+    get_api_zip_path,
+    get_api_folder_path,
+    get_save_folder,
     load_saved_path,
     save_path,
     normalize_path,
     get_root_from_exe,
     get_mods_dir,
+    get_disabled_dir,
+    get_metadata_path,
     get_game_exe_path,
-)
-from utils.system_utils import (
-    get_system_type,
-    get_save_folder,
-    get_api_zip_path,
-    get_api_folder_path,
-)
-from utils.game_utils import (
     find_hollow_knight_exe,
 )
-
-__all__ = [
-    # path_utils
-    "load_saved_path",
-    "save_path",
-    "normalize_path",
-    "get_root_from_exe",
-    "get_mods_dir",
-    "get_game_exe_path",
-    # system_utils
-    "get_system_type",
-    "get_save_folder",
-    "get_api_zip_path",
-    "get_api_folder_path",
-    # game_utils
-    "find_hollow_knight_exe",
-]

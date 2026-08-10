@@ -45,6 +45,7 @@ from ui.dialogs import (
     show_path_select_dialog,
     show_missing_deps_dialog,
     show_mod_errors_dialog,
+    AboutMarkdownDialog,
 )
 from ui.mod_page import ModPage, OnlineModPage
 from ui.update_checker import check_for_updates
@@ -565,12 +566,10 @@ class MainWindow(QMainWindow):
         self.max_btn.update()
 
     def _show_about_md(self):
-        from ui.about_dialog import AboutMarkdownDialog
         dialog = AboutMarkdownDialog(self)
         dialog.exec()
 
     def _show_usage_md(self):
-        from ui.about_dialog import AboutMarkdownDialog
         usage_url = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@main/USAGE.md"
         dialog = AboutMarkdownDialog(self, url=usage_url, title="使用教程")
         dialog.exec()

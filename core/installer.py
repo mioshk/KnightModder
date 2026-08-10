@@ -16,8 +16,7 @@ from typing import List, Set, Dict, Optional, Callable
 import requests
 
 from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL
-from utils.system_utils import get_api_zip_path, get_api_folder_path
-from utils.path_utils import get_game_exe_path, get_mods_dir
+from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir
 
 
 # ==================== 文件工具函数 ====================
