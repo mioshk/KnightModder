@@ -328,6 +328,20 @@ def show_mod_errors_dialog(parent, errors):
                     )
                     scroll_layout.addWidget(dll_label)
 
+        elif error_type == "同名dll文件冲突":
+            for dll_name, folders in error_data.items():
+                conflict_label = QLabel(f"  ⚡ {dll_name}")
+                conflict_label.setStyleSheet(
+                    f"color: {COLOR_ACCENT_RED}; font-size: 12px; background: transparent; border: none;"
+                )
+                scroll_layout.addWidget(conflict_label)
+                for folder in folders:
+                    folder_item = QLabel(f"    📁 {folder}")
+                    folder_item.setStyleSheet(
+                        f"color: {COLOR_TEXT_TERTIARY}; font-size: 12px; background: transparent; border: none;"
+                    )
+                    scroll_layout.addWidget(folder_item)
+
         elif error_type == "存在重复的Mod":
             for clean_name, items in error_data.items():
                 name_label = QLabel(f"  🔄 {clean_name}")

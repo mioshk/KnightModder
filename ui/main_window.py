@@ -1352,7 +1352,7 @@ class MainWindow(QMainWindow):
 
         errors = []
         root_dlls = []
-        folder_dlls = {}
+        dll_owners = {}  # dll文件名 -> [所属文件夹列表]
 
         items = [item for item in os.listdir(mods_dir) if item != "Disabled"]
 
@@ -1360,8 +1360,11 @@ class MainWindow(QMainWindow):
             item_path = os.path.join(mods_dir, item)
             if os.path.isdir(item_path):
                 dll_files = [f for f in os.listdir(item_path) if f.endswith('.dll')]
-                if dll_files:
-                    folder_dlls[item] = [(f, os.path.join(item_path, f)) for f in dll_files]
+                for dll in dll_files:
+                    name_lower = dll.lower()
+                    if name_lower not in dll_owners:
+                        dll_owners[name_lower] = []
+                    dll_owners[name_lower].append(item)
             elif os.path.isfile(item_path) and item.endswith('.dll'):
                 root_dlls.append(item)
 
@@ -1372,11 +1375,26 @@ class MainWindow(QMainWindow):
                 error_msg += f"  • {dll}\n"
             errors.append(error_msg)
 
+        # 同名 dll 检测：同一 dll 名出现在多个不同文件夹
+        dup_dlls = {k: v for k, v in dll_owners.items() if len(v) > 1}
+        if dup_dlls:
+            self._log(f"⚠️ 发现 {len(dup_dlls)} 个同名 .dll 文件冲突", "warning")
+            errors.append(("同名dll文件冲突", dup_dlls))
+
         if errors:
-            full_error_msg = "发现以下Mod安装错误:\n\n"
-            for i, error in enumerate(errors, 1):
-                full_error_msg += f"{i}. {error}\n"
-            QMessageBox.warning(self, "Mod错误检查", full_error_msg)
+            # 有结构化错误（tuple 类型）则用对话框渲染
+            structured_errors = [e for e in errors if isinstance(e, tuple)]
+            plain_errors = [e for e in errors if isinstance(e, str)]
+            if structured_errors:
+                # 把 plain 错误也转成结构化，统一用对话框显示
+                if plain_errors:
+                    structured_errors.append(("Mods根目录存在 .dll 文件", {"_items": plain_errors}))
+                show_mod_errors_dialog(self, structured_errors)
+            else:
+                full_error_msg = "发现以下Mod安装错误:\n\n"
+                for i, error in enumerate(errors, 1):
+                    full_error_msg += f"{i}. {error}\n"
+                QMessageBox.warning(self, "Mod错误检查", full_error_msg)
         else:
             self._log("✅ Mod 错误检查通过，未发现异常", "success")
             QMessageBox.information(self, "检查完成", "所有Mod安装正确，未发现错误！")
