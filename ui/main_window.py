@@ -32,7 +32,6 @@ from config import (
     APP_NAME,
     MANAGED_RELATIVE_PATH,
     MODLINKS_URL,
-    REQUIRED_GAME_VERSION,
     COLOR_BG,
     COLOR_BORDER,
     COLOR_ACCENT_GREEN,
@@ -57,7 +56,6 @@ from utils import (
     get_mods_dir,
     get_save_folder,
     get_api_zip_path,
-    get_game_version,
     find_hollow_knight_exe,
 )
 from core import (
@@ -324,8 +322,6 @@ class MainWindow(QMainWindow):
         self.game_path = ""
         self.resolver = DependencyResolver()
         self.missing_deps = set()
-        self.version_checked = False
-        self.version_info = None
         self.is_loading = False
 
         self.settings = QSettings("KnightModder", "Settings")
@@ -410,7 +406,6 @@ class MainWindow(QMainWindow):
         self.game_path = root
         self.path_input.setText(root)
         save_path(root)
-        self._check_game_version(root)
 
     # ==================== UI 构建（完全原样） ====================
     def _setup_ui(self):
@@ -1069,30 +1064,6 @@ class MainWindow(QMainWindow):
         if os.path.isdir(os.path.join(game_path, MANAGED_RELATIVE_PATH)):
             self._commit_path(game_path)
 
-    def _check_game_version(self, game_path):
-        version = get_game_version(game_path)
-        self.version_info = version
-
-        if version:
-            if version.startswith(REQUIRED_GAME_VERSION):
-                self.version_status_label.setText(f"✅ v{version}")
-                self.version_status_label.setStyleSheet(
-                    "color: #66bb6a; background: transparent; font-size: 12px;"
-                )
-                self.version_checked = True
-                return True
-            else:
-                self.version_status_label.setText(f"⚠️ v{version}")
-                self.version_status_label.setStyleSheet(
-                    "color: #e53935; background: transparent; font-size: 12px;"
-                )
-                self.version_checked = True
-                return False
-        else:
-            self.version_status_label.setText("")
-            self.version_checked = True
-            return None
-
     def _browse_exe(self):
         last_path = self.settings.value("game_exe_path", "")
         last_dir = os.path.dirname(last_path) if last_path else ""
@@ -1190,14 +1161,6 @@ class MainWindow(QMainWindow):
         game_path = self.path_input.text()
         if game_path.endswith('.exe'):
             game_path = get_root_from_exe(game_path)
-
-        version_check = self._check_game_version(game_path)
-        if version_check is False:
-            QMessageBox.warning(
-                self, "版本错误",
-                f"当前游戏版本不是 {REQUIRED_GAME_VERSION}，可能不兼容！\n请使用 v{REQUIRED_GAME_VERSION} 版本的游戏。"
-            )
-            return
 
         try:
             import subprocess

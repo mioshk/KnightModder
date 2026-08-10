@@ -18,7 +18,6 @@ from utils.system_utils import (
     get_api_folder_path,
 )
 from utils.game_utils import (
-    get_game_version,
     find_hollow_knight_exe,
 )
 
@@ -36,6 +35,5 @@ __all__ = [
     "get_api_zip_path",
     "get_api_folder_path",
     # game_utils
-    "get_game_version",
     "find_hollow_knight_exe",
 ]

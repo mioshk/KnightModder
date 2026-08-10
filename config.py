@@ -29,9 +29,6 @@ API_ZIP_MAP = {
     "Linux":   "moddingapi.v77.linux.zip",
 }
 
-# ---------- 游戏版本要求 ----------
-REQUIRED_GAME_VERSION = "1.5.78"
-
 # ---------- 暗黑极简配色方案 ----------
 COLOR_BG = "#0F0F0F"
 COLOR_CARD = "#1E1E1E"

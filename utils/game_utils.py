@@ -1,73 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 游戏工具模块
-包含游戏版本检测、自动查找游戏安装目录等函数
+包含自动查找游戏安装目录等函数
 """
 import os
-import re
 
-from config import MANAGED_RELATIVE_PATH
 from utils.path_utils import normalize_path
 from utils.system_utils import get_system_type
-
-
-def get_game_version(game_path):
-    """
-    获取游戏版本号
-    优先从version文件读取，其次尝试读取dll/exe文件版本信息
-    """
-    try:
-        # 方法1: 读取 version 文件
-        version_file = os.path.join(game_path, "hollow_knight_Data", "version")
-        if os.path.isfile(version_file):
-            with open(version_file, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                match = re.search(r'(\d+\.\d+\.\d+)', content)
-                if match:
-                    return match.group(1)
-                return content
-
-        # 方法2: 读取 Assembly-CSharp.dll 版本
-        dll_path = os.path.join(game_path, MANAGED_RELATIVE_PATH, "Assembly-CSharp.dll")
-        if os.path.isfile(dll_path):
-            try:
-                import win32api
-                info = win32api.GetFileVersionInfo(dll_path, "\\")
-                version = f"{info['FileVersionMS'] >> 16}.{info['FileVersionMS'] & 0xFFFF}.{info['FileVersionLS'] >> 16}.{info['FileVersionLS'] & 0xFFFF}"
-                parts = version.split('.')
-                if len(parts) >= 3:
-                    return f"{parts[0]}.{parts[1]}.{parts[2]}"
-                return version
-            except Exception:
-                pass
-
-        # 方法3: 读取 exe 版本
-        exe_path = os.path.join(game_path, "hollow_knight.exe")
-        if os.path.isfile(exe_path):
-            try:
-                import win32api
-                info = win32api.GetFileVersionInfo(exe_path, "\\")
-                version = f"{info['FileVersionMS'] >> 16}.{info['FileVersionMS'] & 0xFFFF}.{info['FileVersionLS'] >> 16}.{info['FileVersionLS'] & 0xFFFF}"
-                parts = version.split('.')
-                if len(parts) >= 3:
-                    return f"{parts[0]}.{parts[1]}.{parts[2]}"
-                return version
-            except Exception:
-                pass
-
-        # 方法4: StreamingAssets/version
-        version_file2 = os.path.join(game_path, "hollow_knight_Data", "StreamingAssets", "version")
-        if os.path.isfile(version_file2):
-            with open(version_file2, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                match = re.search(r'(\d+\.\d+\.\d+)', content)
-                if match:
-                    return match.group(1)
-                return content
-
-    except Exception:
-        pass
-    return None
 
 
 def find_hollow_knight_exe():
