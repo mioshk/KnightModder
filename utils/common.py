@@ -199,12 +199,13 @@ def find_hollow_knight_exe():
                 if os.path.isfile(exe):
                     results.append((exe, normalize_path(gp)))
 
-        # 去重
+        # 去重（Windows 路径大小写不敏感）
         seen = set()
         unique_results = []
         for exe, path in results:
-            if path not in seen:
-                seen.add(path)
+            key = os.path.normcase(path)
+            if key not in seen:
+                seen.add(key)
                 unique_results.append((exe, path))
         results = unique_results
 

@@ -356,6 +356,15 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    # ==================== 路径显示工具 ====================
+    @staticmethod
+    def _display_path(root):
+        """将游戏根目录转为 exe 路径用于 UI 显示"""
+        if not root:
+            return root
+        exe = os.path.join(root, "hollow_knight.exe")
+        return normalize_path(exe)
+
     # ==================== 路径加载（不弹窗、不写文件） ====================
     def _load_saved_path(self):
         p = load_saved_path()
@@ -363,7 +372,7 @@ class MainWindow(QMainWindow):
             return
         if os.path.isdir(os.path.join(p, MANAGED_RELATIVE_PATH)):
             self.game_path = p
-            self.path_input.setText(p)
+            self.path_input.setText(self._display_path(p))
 
     # ==================== 对外接口：首次启动弹窗 ====================
     def trigger_first_run_dialog(self):
@@ -405,7 +414,7 @@ class MainWindow(QMainWindow):
     # ==================== 唯一写 config 的地方 ====================
     def _commit_path(self, root):
         self.game_path = root
-        self.path_input.setText(root)
+        self.path_input.setText(self._display_path(root))
         save_path(root)
 
     # ==================== UI 构建（完全原样） ====================
