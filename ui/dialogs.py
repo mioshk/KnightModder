@@ -390,8 +390,24 @@ class AboutMarkdownDialog(QDialog):
         self.parent = parent
         self.remote_url = url if url else self.REMOTE_URL
         self.dialog_title = title
+        self.loader = None
         self._setup_ui()
         self._load_content()
+
+    def done(self, result):
+        """关闭对话框时安全清理后台加载线程"""
+        if self.loader is not None:
+            try:
+                self.loader.finished.disconnect(self._on_content_loaded)
+            except Exception:
+                pass
+            if self.loader.isRunning():
+                self.loader.quit()
+                if not self.loader.wait(2000):
+                    self.loader.terminate()
+                    self.loader.wait(1000)
+            self.loader = None
+        super().done(result)
 
     def _setup_ui(self):
         self.setWindowTitle(self.dialog_title)

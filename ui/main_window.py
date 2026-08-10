@@ -262,7 +262,7 @@ def get_dll_identity(dll_path):
                                 ctypes.byref(struct_ptr2),
                                 ctypes.byref(struct_len2)
                             ):
-                                if struct_len2.value > 0:
+                                if struct_len2.value and struct_len2.value > 0 and struct_ptr2.value is not None:
                                     return ctypes.wstring_at(struct_ptr2.value, struct_len2.value // 2)
                 except Exception:
                     pass
@@ -438,12 +438,17 @@ class MainWindow(QMainWindow):
             f"border: 1px solid rgba(255, 255, 255, 0.08); }}"
         )
 
-        shadow = QGraphicsDropShadowEffect(root)
-        shadow.setBlurRadius(50)
-        shadow.setXOffset(0)
-        shadow.setYOffset(15)
-        shadow.setColor(QColor(0, 0, 0, 150))
-        root.setGraphicsEffect(shadow)
+        self._root = root
+        self._outer = outer
+        self._outer.setMouseTracking(True)
+        self._outer.installEventFilter(self)
+        self._outer_layout = outer_layout
+        self._shadow = QGraphicsDropShadowEffect(root)
+        self._shadow.setBlurRadius(50)
+        self._shadow.setXOffset(0)
+        self._shadow.setYOffset(15)
+        self._shadow.setColor(QColor(0, 0, 0, 150))
+        root.setGraphicsEffect(self._shadow)
 
         outer_layout.addWidget(root)
         self.setCentralWidget(outer)
@@ -566,13 +571,102 @@ class MainWindow(QMainWindow):
     def _toggle_maximize(self):
         if self._is_maximized:
             self.showNormal()
-            self.max_btn.icon_type = "max"
         else:
             self.showMaximized()
-            self.max_btn.icon_type = "restore"
 
-        self._is_maximized = not self._is_maximized
-        self.max_btn.update()
+    # ==================== 最大化/还原时的 UI 适配 ====================
+    _NORMAL_STYLE = (
+        "#MainWindowCard { "
+        "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+        "stop:0 #1a1a1a, stop:1 #0f0f0f); "
+        "border-radius: 20px; "
+        "border: 1px solid rgba(255, 255, 255, 0.08); }"
+    )
+    _MAXIMIZED_STYLE = (
+        "#MainWindowCard { "
+        "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+        "stop:0 #1a1a1a, stop:1 #0f0f0f); "
+        "border-radius: 0px; "
+        "border: none; }"
+    )
+
+    def changeEvent(self, event):
+        if event.type() == event.Type.WindowStateChange:
+            if not hasattr(self, '_outer_layout') or not hasattr(self, 'max_btn'):
+                return super().changeEvent(event)
+            if self.windowState() & Qt.WindowMaximized:
+                self._is_maximized = True
+                self.max_btn.icon_type = "restore"
+                self._outer_layout.setContentsMargins(0, 0, 0, 0)
+                self._root.setStyleSheet(self._MAXIMIZED_STYLE)
+            elif not (self.windowState() & Qt.WindowMaximized):
+                self._is_maximized = False
+                self.max_btn.icon_type = "max"
+                self._outer_layout.setContentsMargins(20, 20, 20, 20)
+                self._root.setStyleSheet(self._NORMAL_STYLE)
+            self.max_btn.update()
+        super().changeEvent(event)
+
+    # ==================== 边缘拖拽调整窗口大小 ====================
+    _BORDER = 6  # 边缘拖拽识别宽度（像素），以窗口真实边缘为准
+
+    def _hit_edge(self, pos):
+        """返回鼠标所在的窗口边缘（用于 resize），不在边缘则返回 None"""
+        b = self._BORDER
+        w, h = self._outer.width(), self._outer.height()
+        on_left = pos.x() <= b
+        on_right = pos.x() >= w - b
+        on_top = pos.y() <= b
+        on_bottom = pos.y() >= h - b
+
+        if on_top and on_left:
+            return Qt.TopEdge | Qt.LeftEdge
+        if on_top and on_right:
+            return Qt.TopEdge | Qt.RightEdge
+        if on_bottom and on_left:
+            return Qt.BottomEdge | Qt.LeftEdge
+        if on_bottom and on_right:
+            return Qt.BottomEdge | Qt.RightEdge
+        if on_left:
+            return Qt.LeftEdge
+        if on_right:
+            return Qt.RightEdge
+        if on_top:
+            return Qt.TopEdge
+        if on_bottom:
+            return Qt.BottomEdge
+        return None
+
+    def eventFilter(self, obj, event):
+        if obj is not self._outer or self._is_maximized:
+            return super().eventFilter(obj, event)
+
+        t = event.type()
+        if t == event.Type.MouseMove:
+            edge = self._hit_edge(event.position().toPoint())
+            cursor = {
+                Qt.TopEdge | Qt.LeftEdge: Qt.SizeFDiagCursor,
+                Qt.BottomEdge | Qt.RightEdge: Qt.SizeFDiagCursor,
+                Qt.TopEdge | Qt.RightEdge: Qt.SizeBDiagCursor,
+                Qt.BottomEdge | Qt.LeftEdge: Qt.SizeBDiagCursor,
+                Qt.LeftEdge: Qt.SizeHorCursor,
+                Qt.RightEdge: Qt.SizeHorCursor,
+                Qt.TopEdge: Qt.SizeVerCursor,
+                Qt.BottomEdge: Qt.SizeVerCursor,
+            }
+            self._outer.setCursor(cursor.get(edge, Qt.ArrowCursor))
+            self._resize_edge = edge
+        elif t == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
+            if self._resize_edge is not None:
+                wh = self.windowHandle()
+                if wh:
+                    wh.startSystemResize(self._resize_edge)
+                return True
+        elif t == event.Type.Leave:
+            self._outer.setCursor(Qt.ArrowCursor)
+            self._resize_edge = None
+
+        return super().eventFilter(obj, event)
 
     def _show_about_md(self):
         dialog = AboutMarkdownDialog(self)

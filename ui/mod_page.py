@@ -3,6 +3,7 @@
 import os
 import re
 import webbrowser
+from typing import Callable, Optional
 from PySide6.QtCore import Qt, QTimer, QSignalBlocker, QSize, QEvent
 from PySide6.QtWidgets import (
     QWidget,
@@ -674,7 +675,7 @@ class ModDetailPanel(QWidget):
 
         self.main_layout.addStretch()
 
-        self._dep_checker = None
+        self._dep_checker: Optional[Callable[[str], bool]] = None
         self._show_empty_state()
 
     def _wrap_in_layout_widget(self, layout):
@@ -2210,7 +2211,7 @@ class OnlineModPage(QWidget):
                 is_installed = local_info is not None
                 has_update = False
 
-                if is_installed and online_version:
+                if local_info is not None and online_version:
                     if normalize_version(online_version) != normalize_version(local_info[1]):
                         has_update = True
 
