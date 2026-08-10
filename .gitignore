@@ -5,3 +5,6 @@
 /__pycache__
 /build.bat
 /config.json
+/core/__pycache__
+/ui/__pycache__
+/utils/__pycache__
