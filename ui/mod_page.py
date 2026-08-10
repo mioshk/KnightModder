@@ -3,7 +3,7 @@
 import os
 import re
 import webbrowser
-from PySide6.QtCore import Qt, QTimer, QSignalBlocker, QSize
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker, QSize, QEvent
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -1073,7 +1073,7 @@ class ModPage(QWidget):
                 color: #888888;
             }
         """)
-        self.search_input.textChanged.connect(self._filter_mods)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
         nav_layout.addWidget(self.search_input)
 
         nav_layout.addSpacing(10)
@@ -1134,7 +1134,7 @@ class ModPage(QWidget):
                 selection-color: white;
             }
         """)
-        self.filter_combo.currentIndexChanged.connect(self._filter_mods)
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.filter_combo)
 
         self.batch_actions_widget = QWidget()
@@ -1256,6 +1256,7 @@ class ModPage(QWidget):
         """)
         self.mod_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.mod_list.itemDoubleClicked.connect(self._on_item_double_clicked)
+        self.mod_list.viewport().installEventFilter(self)
         left_layout.addWidget(self.mod_list)
 
         right_panel = QWidget()
@@ -1360,8 +1361,14 @@ class ModPage(QWidget):
 
     # ---------- 右下角提示相关 ----------
     def eventFilter(self, obj, event):
-        if obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
+        if hasattr(self, 'detail_scroll') and obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
             self._reposition_copy_tip()
+            return True
+        if obj == self.mod_list.viewport() and event.type() == QEvent.MouseButtonPress:
+            item = self.mod_list.itemAt(event.pos())
+            if item is None:
+                self._clear_selection()
+                return True
         return super().eventFilter(obj, event)
 
     def _reposition_copy_tip(self):
@@ -1703,6 +1710,33 @@ class ModPage(QWidget):
         if self.parent and hasattr(self.parent, 'game_path'):
             self.refresh_mod_list(self.parent.game_path)
 
+    def _clear_selection(self):
+        if self.mod_list.selectedItems():
+            self.mod_list.clearSelection()
+        if self._current_widget:
+            self._current_widget.set_selected(False)
+            self._current_widget = None
+        self._current_mod = None
+        self.copy_link_btn.setEnabled(False)
+        self.copy_batch_btn.setEnabled(False)
+        self.detail_scroll.detail_panel._show_empty_state()
+
+    def _on_search_text_changed(self, text):
+        self._clear_selection()
+        self._filter_mods()
+
+    def _on_filter_changed(self, index):
+        self._clear_selection()
+        self._filter_mods()
+
+    def _select_and_show_item(self, item):
+        if not item:
+            return
+        self.mod_list.clearSelection()
+        item.setSelected(True)
+        self.mod_list.setCurrentItem(item)
+        self._on_item_clicked(item)
+
     def _show_mod_detail(self, mod_name):
         try:
             enabled = False
@@ -1863,7 +1897,7 @@ class OnlineModPage(QWidget):
                 color: #888888;
             }
         """)
-        self.search_input.textChanged.connect(self._filter_mods)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
         nav_layout.addWidget(self.search_input)
 
         nav_layout.addSpacing(10)
@@ -1923,7 +1957,7 @@ class OnlineModPage(QWidget):
                 selection-color: white;
             }
         """)
-        self.filter_combo.currentIndexChanged.connect(self._filter_mods)
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.filter_combo)
         filter_layout.addStretch()
 
@@ -1975,6 +2009,7 @@ class OnlineModPage(QWidget):
             }
         """)
         self.mod_list.itemClicked.connect(self._on_item_clicked)
+        self.mod_list.viewport().installEventFilter(self)
         left_layout.addWidget(self.mod_list)
 
         right_panel = QWidget()
@@ -2079,8 +2114,14 @@ class OnlineModPage(QWidget):
 
     # ---------- 右下角提示相关 ----------
     def eventFilter(self, obj, event):
-        if obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
+        if hasattr(self, 'detail_scroll') and obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
             self._reposition_copy_tip()
+            return True
+        if obj == self.mod_list.viewport() and event.type() == QEvent.MouseButtonPress:
+            item = self.mod_list.itemAt(event.pos())
+            if item is None:
+                self._clear_selection()
+                return True
         return super().eventFilter(obj, event)
 
     def _reposition_copy_tip(self):
@@ -2261,6 +2302,33 @@ class OnlineModPage(QWidget):
         visible_count = sum(1 for i in range(self.mod_list.count()) if not self.mod_list.item(i).isHidden())
         self.count_label.setText(f"共 {visible_count} 个模组")
 
+    def _clear_selection(self):
+        if self.mod_list.selectedItems():
+            self.mod_list.clearSelection()
+        if self._current_widget:
+            self._current_widget.set_selected(False)
+            self._current_widget = None
+        self._current_mod = None
+        self.copy_link_btn.setEnabled(False)
+        self.copy_batch_btn.setEnabled(False)
+        self.detail_scroll.detail_panel._show_empty_state()
+
+    def _on_search_text_changed(self, text):
+        self._clear_selection()
+        self._filter_mods()
+
+    def _on_filter_changed(self, index):
+        self._clear_selection()
+        self._filter_mods()
+
+    def _select_and_show_item(self, item):
+        if not item:
+            return
+        self.mod_list.clearSelection()
+        item.setSelected(True)
+        self.mod_list.setCurrentItem(item)
+        self._on_item_clicked(item)
+
     def _manual_refresh(self):
         if self.parent and hasattr(self.parent, 'game_path'):
             self.refresh_mod_list(self.parent.game_path)
@@ -2325,6 +2393,12 @@ class OnlineModPage(QWidget):
 
         if not self.parent or not hasattr(self.parent, 'resolver'):
             return
+
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item.data(Qt.UserRole) == mod_name:
+                self._select_and_show_item(item)
+                break
 
         resolver = self.parent.resolver
         if mod_name not in resolver.mod_data_by_name:

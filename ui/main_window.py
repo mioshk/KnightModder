@@ -1073,7 +1073,7 @@ class MainWindow(QMainWindow):
         version = get_game_version(game_path)
         self.version_info = version
 
-        if version:
+        if version and version != "0.0.0":
             if version.startswith(REQUIRED_GAME_VERSION):
                 self.version_status_label.setText(f"✅ v{version}")
                 self.version_status_label.setStyleSheet(
