@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         outer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         outer.setStyleSheet("background: transparent;")
         outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(20, 20, 20, 20)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
         root = QWidget()
@@ -443,12 +443,6 @@ class MainWindow(QMainWindow):
         self._outer.setMouseTracking(True)
         self._outer.installEventFilter(self)
         self._outer_layout = outer_layout
-        self._shadow = QGraphicsDropShadowEffect(root)
-        self._shadow.setBlurRadius(50)
-        self._shadow.setXOffset(0)
-        self._shadow.setYOffset(15)
-        self._shadow.setColor(QColor(0, 0, 0, 150))
-        root.setGraphicsEffect(self._shadow)
 
         outer_layout.addWidget(root)
         self.setCentralWidget(outer)
@@ -602,7 +596,7 @@ class MainWindow(QMainWindow):
             elif not (self.windowState() & Qt.WindowMaximized):
                 self._is_maximized = False
                 self.max_btn.icon_type = "max"
-                self._outer_layout.setContentsMargins(20, 20, 20, 20)
+                self._outer_layout.setContentsMargins(0, 0, 0, 0)
                 self._root.setStyleSheet(self._NORMAL_STYLE)
             self.max_btn.update()
         super().changeEvent(event)
