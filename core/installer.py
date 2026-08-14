@@ -15,8 +15,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL, get_base_dir
-from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir
+from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL, MODLINKS_BACKUP_URL, get_base_dir
+from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir, safe_requests_get
 
 
 # ==================== 文件工具函数 ====================
@@ -634,39 +634,49 @@ class DependencyResolver:
 
     def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None) -> bool:
         """
-        从URL加载Mod依赖数据
+        从URL加载Mod依赖数据（多源容灾：主源失败自动回退备用源）
         :param url: Mod列表XML地址，默认使用 config.MODLINKS_URL
         :param progress_callback: 进度回调函数
         :return: 是否加载成功
         """
-        if url is None:
-            url = MODLINKS_URL
-
         import requests  # 延迟导入，避免拖慢启动
 
-        try:
+        # 主备地址去重
+        urls = [url or MODLINKS_URL]
+        if MODLINKS_BACKUP_URL and MODLINKS_BACKUP_URL not in urls:
+            urls.append(MODLINKS_BACKUP_URL)
+
+        last_err = None
+        for i, u in enumerate(urls):
+            label = "主源" if i == 0 else "备用源"
+            try:
+                if progress_callback:
+                    progress_callback(f"🔍 正在从{label}加载 Mod 链接...", "info")
+
+                response = safe_requests_get(
+                    u, timeout=15,
+                    ssl_warn_callback=lambda msg: progress_callback(msg, "warning") if progress_callback else None
+                )
+                response.raise_for_status()
+
+                if progress_callback:
+                    progress_callback("📥 正在解析 Mod 数据...", "info")
+
+                if self._parse_xml_content(response.content, progress_callback):
+                    # 解析成功后才写入本地缓存，避免坏数据覆盖缓存
+                    self.save_cache(response.content)
+                    return True
+                last_err = "数据解析失败"
+            except requests.exceptions.RequestException as e:
+                last_err = str(e)
+            except Exception as e:
+                last_err = str(e)
             if progress_callback:
-                progress_callback("🔍 正在从网络加载 Mod 链接...", "info")
+                progress_callback(f"⚠️ {label}拉取失败：{last_err}，正在尝试其他源...", "warning")
 
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-
-            # 写入本地缓存，下次启动直接秒开
-            self.save_cache(response.content)
-
-            if progress_callback:
-                progress_callback("📥 正在解析 Mod 数据...", "info")
-
-            return self._parse_xml_content(response.content, progress_callback)
-
-        except requests.exceptions.RequestException as e:
-            if progress_callback:
-                progress_callback(f"❌ 网络请求失败：{e}", "error")
-            return False
-        except Exception as e:
-            if progress_callback:
-                progress_callback(f"❌ 加载失败：{e}", "error")
-            return False
+        if progress_callback:
+            progress_callback(f"❌ 所有源均拉取失败：{last_err}", "error")
+        return False
 
     def _parse_xml_content(self, content, progress_callback: Optional[Callable] = None) -> bool:
         """解析XML内容"""

@@ -20,7 +20,10 @@ MANAGED_RELATIVE_PATH = r"hollow_knight_Data\Managed"
 CONFIG_FILE = "config.json"
 
 # ---------- 网络资源 URL ----------
+# 主源：jsDelivr CDN
 MODLINKS_URL = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@latest/ModLinksCN.xml"
+# 备用源：jsDelivr 拉取失败时回退到 GitHub raw
+MODLINKS_BACKUP_URL = "https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml"
 
 # ---------- API 压缩包平台映射 ----------
 API_ZIP_MAP = {

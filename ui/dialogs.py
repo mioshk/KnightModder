@@ -6,6 +6,8 @@
 import os
 import re
 
+from utils.common import safe_requests_get
+
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -515,7 +517,7 @@ class MdLoader(QThread):
     def run(self):
         import requests  # 延迟导入
         try:
-            response = requests.get(self.url, timeout=10)
+            response = safe_requests_get(self.url, timeout=10)
             if response.status_code == 200:
                 self.finished.emit(True, response.text)
             else:

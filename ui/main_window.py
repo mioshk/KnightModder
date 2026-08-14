@@ -5,6 +5,7 @@
 import os
 import re
 import sys
+import time
 import threading
 import webbrowser
 from PySide6.QtCore import Qt, QTimer, QTime, QSize, QByteArray, QSettings, Signal
@@ -330,6 +331,7 @@ class MainWindow(QMainWindow):
         self.missing_deps = set()
         self.is_loading = False
         self._dependency_lock = threading.Lock()  # 防止多个刷新线程并发写缓存/数据
+        self._last_launch_ts = 0.0  # 启动游戏防抖时间戳
 
         # 线程安全信号：连接主线程槽函数
         self.log_signal.connect(self._append_log)
@@ -1256,18 +1258,44 @@ class MainWindow(QMainWindow):
 
     # ==================== 游戏进程检测与停止 ====================
     def _find_game_process(self):
-        import psutil  # 延迟导入，避免拖慢启动
+        """检测 hollow_knight.exe 进程。
+
+        psutil 为主，tasklist 兜底：
+        - psutil 枚举其他用户会话的进程时，info['name'] 可能因权限返回空/抛 AccessDenied，
+          整条进程被 continue 跳过 → 漏检 → 重复启动 → 游戏弹 "another instance is already running"
+        - tasklist 即使对别的用户/会话进程也能列出镜像名和 PID，作为第二道保险
+        """
+        import subprocess
+
+        # ① psutil 枚举（快，全覆盖）
         try:
-            # 只取 pid + name（name 匹配足够；带上 exe 可能因权限失败导致整条进程被跳过，漏检游戏进程）
+            import psutil  # 延迟导入，避免拖慢启动
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    name = proc.info['name'] or ''
-                    if name.lower() == 'hollow_knight.exe':
+                    name = (proc.info.get('name') or '').lower()
+                    if name == 'hollow_knight.exe':
                         return proc
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-        except Exception:
-            pass
+        except Exception as e:
+            self._log(f"进程检测(psutil)异常: {e}", "error")
+
+        # ② tasklist 兜底：列出所有会话/用户的进程（含 psutil 漏检的）
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            for line in out.stdout.splitlines():
+                parts = [p.strip('" ') for p in line.strip().split('","')]
+                if parts and parts[0].lower() == 'hollow_knight.exe' and len(parts) >= 2 and parts[1].isdigit():
+                    pid = int(parts[1])
+                    # 构造兼容 proc.info['pid'] / proc.info['name'] 的对象
+                    return type("Proc", (), {"info": {"pid": pid, "name": "hollow_knight.exe"}})()
+        except Exception as e:
+            self._log(f"进程检测(tasklist)异常: {e}", "error")
+
         return None
 
     def _check_game_running(self):
@@ -1326,13 +1354,20 @@ class MainWindow(QMainWindow):
         if game_path.endswith('.exe'):
             game_path = get_root_from_exe(game_path)
 
+        # 防抖：2 秒内禁止重复触发（双击/连点导致 clicked 连发）
+        now = time.time()
+        if now - self._last_launch_ts < 2:
+            self._log("⚠️ 操作过于频繁，请稍候", "warning")
+            return
+        self._last_launch_ts = now
+
         # 前置检查：游戏已在运行则不再重复启动
         # （Hollow Knight 是单实例游戏，二次启动会弹 "another instance is already running" 并退出）
         existing = self._find_game_process()
         if existing is not None:
             self.game_pid = existing.info['pid']
             self.launch_btn.update_style(True)
-            self._log(f"⚠️ 游戏已在运行 (PID {self.game_pid})，无需重复启动", "warning")
+            self._log(f"⚠️ 检测到游戏已在运行 (PID {self.game_pid})，无需重复启动", "warning")
             return
 
         try:

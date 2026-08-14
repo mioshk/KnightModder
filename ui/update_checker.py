@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFrame, QMessageBox, QProgressBar, QWidget, QScrollArea,
 )
 from config import APP_VERSION, UPDATE_CHECK_URL
+from utils.common import safe_requests_get
 
 
 # ==================== 全局状态 ====================
@@ -29,7 +30,7 @@ class UpdateChecker(QThread):
         import requests  # 延迟导入
         from packaging.version import parse as parse_version  # 延迟导入
         try:
-            r = requests.get(self.url, timeout=10)
+            r = safe_requests_get(self.url, timeout=10)
             if r.status_code != 200:
                 self.finished.emit(False, {}, f"HTTP {r.status_code}")
                 return

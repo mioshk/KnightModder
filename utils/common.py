@@ -215,3 +215,25 @@ def find_hollow_knight_exe():
         results = unique_results
 
     return results
+
+
+# ============================================================
+# 网络请求工具（SSL 降级兼容）
+# ============================================================
+def safe_requests_get(url, timeout=10, fallback_on_ssl=True, ssl_warn_callback=None, **kwargs):
+    """
+    带 SSL 证书验证失败自动降级的 requests.get 包装。
+    个别精简/老版本 Windows 系统可能出现根证书缺失，导致证书验证失败。
+    此函数在首次验证失败时自动使用 verify=False 重试一次。
+    """
+    import requests
+    try:
+        return requests.get(url, timeout=timeout, **kwargs)
+    except requests.exceptions.SSLError:
+        if not fallback_on_ssl:
+            raise
+        if ssl_warn_callback:
+            ssl_warn_callback("⚠️ 检测到 SSL 证书验证失败，正在尝试跳过证书验证继续下载...")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        return requests.get(url, timeout=timeout, verify=False, **kwargs)
