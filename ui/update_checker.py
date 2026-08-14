@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """检查更新 - 夸克网盘分发（防双弹窗版）"""
 import io
-import requests
-import qrcode
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap, QFont
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QMessageBox, QProgressBar, QWidget, QScrollArea,
 )
-from packaging.version import parse as parse_version
-
 from config import APP_VERSION, UPDATE_CHECK_URL
 
 
@@ -30,6 +26,8 @@ class UpdateChecker(QThread):
         self.url = UPDATE_CHECK_URL
 
     def run(self):
+        import requests  # 延迟导入
+        from packaging.version import parse as parse_version  # 延迟导入
         try:
             r = requests.get(self.url, timeout=10)
             if r.status_code != 200:
@@ -188,6 +186,7 @@ class UpdateDialog(QDialog):
         main.addWidget(scroll)
 
     def _gen_qrcode(self):
+        import qrcode  # 延迟导入
         try:
             link = self.version_info.get('quark_link', '')
             if not link:

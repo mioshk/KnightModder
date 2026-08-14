@@ -5,7 +5,6 @@
 """
 import os
 import re
-import requests
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -514,6 +513,7 @@ class MdLoader(QThread):
         self.url = url
 
     def run(self):
+        import requests  # 延迟导入
         try:
             response = requests.get(self.url, timeout=10)
             if response.status_code == 200:

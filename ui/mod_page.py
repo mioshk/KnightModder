@@ -1016,6 +1016,7 @@ class ModPage(QWidget):
         self._current_mod = None
         self._current_widget = None
         self._current_row = -1
+        self._rendered = False  # 首次渲染标记：切换标签页时避免重复重建列表
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1603,25 +1604,37 @@ class ModPage(QWidget):
 
             found_mods = []
 
-            if os.path.exists(mods_dir):
-                for item in os.listdir(mods_dir):
-                    if item == "Disabled":
-                        continue
-                    item_path = os.path.join(mods_dir, item)
-                    if os.path.isdir(item_path):
-                        if any(f.endswith('.dll') for f in os.listdir(item_path)):
-                            found_mods.append((item, True))
-                    elif os.path.isfile(item_path) and item.endswith('.dll'):
-                        found_mods.append((os.path.splitext(item)[0], True))
+            try:
+                if os.path.exists(mods_dir):
+                    for item in os.listdir(mods_dir):
+                        if item == "Disabled":
+                            continue
+                        item_path = os.path.join(mods_dir, item)
+                        if os.path.isdir(item_path):
+                            try:
+                                sub_items = os.listdir(item_path)
+                            except OSError:
+                                sub_items = []
+                            if any(f.endswith('.dll') for f in sub_items):
+                                found_mods.append((item, True))
+                        elif os.path.isfile(item_path) and item.endswith('.dll'):
+                            found_mods.append((os.path.splitext(item)[0], True))
 
-            if os.path.exists(disabled_dir):
-                for item in os.listdir(disabled_dir):
-                    item_path = os.path.join(disabled_dir, item)
-                    if os.path.isdir(item_path):
-                        if any(f.endswith('.dll') for f in os.listdir(item_path)):
-                            found_mods.append((item, False))
-                    elif os.path.isfile(item_path) and item.endswith('.dll'):
-                        found_mods.append((os.path.splitext(item)[0], False))
+                if os.path.exists(disabled_dir):
+                    for item in os.listdir(disabled_dir):
+                        item_path = os.path.join(disabled_dir, item)
+                        if os.path.isdir(item_path):
+                            try:
+                                sub_items = os.listdir(item_path)
+                            except OSError:
+                                sub_items = []
+                            if any(f.endswith('.dll') for f in sub_items):
+                                found_mods.append((item, False))
+                        elif os.path.isfile(item_path) and item.endswith('.dll'):
+                            found_mods.append((os.path.splitext(item)[0], False))
+            except OSError:
+                # 目录被删除/无权限等异常，按"没有已安装模组"处理
+                found_mods = []
 
             if not found_mods:
                 self.mod_list.addItem("暂无已安装模组")
@@ -1638,6 +1651,8 @@ class ModPage(QWidget):
 
             resolver = self.parent.resolver if self.parent and hasattr(self.parent, 'resolver') else None
 
+            # 批量插入期间禁用重绘/重排，结束后一次性布局（大幅提速）
+            self.mod_list.setUpdatesEnabled(False)
             for mod_name, enabled in found_mods:
                 chinese_name = ""
                 if resolver and hasattr(resolver, 'mod_data_by_name'):
@@ -1664,6 +1679,8 @@ class ModPage(QWidget):
             self.search_input.setText(saved_search_text)
             with QSignalBlocker(self.filter_combo):
                 self.filter_combo.setCurrentIndex(saved_filter_index)
+            # 恢复 UI 更新，一次性完成重排
+            self.mod_list.setUpdatesEnabled(True)
 
             if selected_mod:
                 for i in range(self.mod_list.count()):
@@ -1680,6 +1697,8 @@ class ModPage(QWidget):
                 self.detail_scroll.detail_panel.status_label.setText("👈 点击左侧列表查看详情")
                 self.detail_scroll.detail_panel.status_label.setStyleSheet(
                     "color: #666666; background: transparent; border: none;")
+
+            self._rendered = True
         except Exception:
             pass
 
@@ -1840,6 +1859,7 @@ class OnlineModPage(QWidget):
         self._current_mod = None
         self._current_widget = None
         self._current_row = -1
+        self._rendered = False  # 首次渲染标记：切换标签页时避免重复重建列表
         self._setup_ui()
 
     def _setup_ui(self):
@@ -2230,6 +2250,8 @@ class OnlineModPage(QWidget):
 
             found_mods.sort(key=lambda x: x[0].lower())
 
+            # 批量插入期间禁用重绘/重排，结束后一次性布局（大幅提速）
+            self.mod_list.setUpdatesEnabled(False)
             for mod_name, chinese_name, is_installed, has_update in found_mods:
                 display_name = f"{mod_name}（{chinese_name}）" if chinese_name else mod_name
 
@@ -2258,6 +2280,8 @@ class OnlineModPage(QWidget):
             self.search_input.setText(saved_search_text)
             with QSignalBlocker(self.filter_combo):
                 self.filter_combo.setCurrentIndex(saved_filter_index)
+            # 恢复 UI 更新，一次性完成重排
+            self.mod_list.setUpdatesEnabled(True)
 
             if selected_mod:
                 for i in range(self.mod_list.count()):
@@ -2275,6 +2299,8 @@ class OnlineModPage(QWidget):
                 self.detail_scroll.detail_panel.status_label.setText("👈 点击左侧列表查看详情")
                 self.detail_scroll.detail_panel.status_label.setStyleSheet(
                     "color: #666666; background: transparent; border: none;")
+
+            self._rendered = True
         except Exception:
             pass
 

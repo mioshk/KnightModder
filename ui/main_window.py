@@ -7,10 +7,8 @@ import re
 import sys
 import threading
 import webbrowser
-import psutil  # 需要安装: pip install psutil
-from PySide6.QtCore import Qt, QTimer, QTime, QSize, QByteArray, QSettings
-from PySide6.QtGui import QFont, QColor, QLinearGradient, QPixmap, QPainter, QIcon, QPen
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import Qt, QTimer, QTime, QSize, QByteArray, QSettings, Signal
+from PySide6.QtGui import QFont, QColor, QLinearGradient, QPixmap, QPainter, QIcon, QPen, QCursor
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -48,7 +46,6 @@ from ui.dialogs import (
     AboutMarkdownDialog,
 )
 from ui.mod_page import ModPage, OnlineModPage
-from ui.update_checker import check_for_updates
 from utils import (
     load_saved_path,
     save_path,
@@ -303,6 +300,13 @@ def get_dll_key(identity):
 class MainWindow(QMainWindow):
     """主窗口类"""
 
+    # 跨线程安全信号：工作线程 emit，主线程槽函数接收（Qt 自动排队投递）
+    log_signal = Signal(str, str)
+    detect_done = Signal(object)
+    dependency_done = Signal(bool)
+    install_finished = Signal(bool)
+    reload_finished = Signal(bool)
+
     def __init__(self):
         super().__init__()
         self.setWindowFlag(Qt.FramelessWindowHint)
@@ -318,12 +322,27 @@ class MainWindow(QMainWindow):
 
         self._drag_pos = None
         self._is_maximized = False
+        self._resize_edge = None
 
         # 业务状态
         self.game_path = ""
         self.resolver = DependencyResolver()
         self.missing_deps = set()
         self.is_loading = False
+        self._dependency_lock = threading.Lock()  # 防止多个刷新线程并发写缓存/数据
+
+        # 线程安全信号：连接主线程槽函数
+        self.log_signal.connect(self._append_log)
+        self.detect_done.connect(self._handle_detect_result)
+        self.dependency_done.connect(self._on_load_finished)
+        self.install_finished.connect(self._on_install_finished)
+        self.reload_finished.connect(self._on_reload_finished)
+
+        # 全局事件过滤器：拦截本窗口内任意控件的鼠标事件，
+        # 保证无边框窗口的边缘拖拽 resize 在整条边框上都能生效。
+        # 说明：鼠标按下事件会被子控件（按钮、输入框等）直接消费，
+        # 事件无法冒泡到 _outer，因此过滤器必须安装在 app 级别。
+        QApplication.instance().installEventFilter(self)
 
         self.settings = QSettings("KnightModder", "Settings")
 
@@ -374,6 +393,11 @@ class MainWindow(QMainWindow):
             self.game_path = p
             self.path_input.setText(self._display_path(p))
 
+    def _manual_check_update(self):
+        """手动检查更新（函数内导入 update_checker，避免启动加载 requests/qrcode 等重模块）"""
+        from ui.update_checker import check_for_updates
+        check_for_updates(self, show_no_update=True)
+
     # ==================== 对外接口：首次启动弹窗 ====================
     def trigger_first_run_dialog(self):
         if self._asked_this_session:
@@ -385,31 +409,47 @@ class MainWindow(QMainWindow):
 
     # ==================== 自动检测并询问 ====================
     def _auto_detect_and_prompt(self):
-        res = find_hollow_knight_exe()
-        if res and len(res) == 1:
-            _, root = res[0]
-            root = normalize_path(root)
-            r = QMessageBox.question(
-                self, "检测到游戏安装",
-                f"我们在以下位置检测到了《空洞骑士》：\n\n{root}\n\n"
-                "这是你的游戏安装路径吗？",
-                QMessageBox.Yes | QMessageBox.No
+        # 后台线程检测，避免遍历多个盘符阻塞 UI（启动慢主因）
+        threading.Thread(target=self._detect_task, daemon=True).start()
+
+    def _detect_task(self):
+        try:
+            res = find_hollow_knight_exe()
+        except Exception:
+            res = []
+        self.detect_done.emit(res)
+
+    def _handle_detect_result(self, res):
+        try:
+            if not self.isVisible():
+                return
+            if res and len(res) == 1:
+                _, root = res[0]
+                root = normalize_path(root)
+                r = QMessageBox.question(
+                    self, "检测到游戏安装",
+                    f"我们在以下位置检测到了《空洞骑士》：\n\n{root}\n\n"
+                    "这是你的游戏安装路径吗？",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if r == QMessageBox.Yes:
+                    self._commit_path(root)
+                return
+
+            if res and len(res) > 1:
+                sel = show_path_select_dialog(self, res)
+                if sel:
+                    self._commit_path(sel)
+                return
+
+            QMessageBox.information(
+                self, "未检测到游戏",
+                "未能自动找到《空洞骑士》的安装路径。\n\n"
+                "请点击「浏览」按钮手动选择 hollow_knight.exe。"
             )
-            if r == QMessageBox.Yes:
-                self._commit_path(root)
-            return
-
-        if res and len(res) > 1:
-            sel = show_path_select_dialog(self, res)
-            if sel:
-                self._commit_path(sel)
-            return
-
-        QMessageBox.information(
-            self, "未检测到游戏",
-            "未能自动找到《空洞骑士》的安装路径。\n\n"
-            "请点击「浏览」按钮手动选择 hollow_knight.exe。"
-        )
+        except RuntimeError:
+            # 窗口已销毁，忽略
+            pass
 
     # ==================== 唯一写 config 的地方 ====================
     def _commit_path(self, root):
@@ -441,7 +481,6 @@ class MainWindow(QMainWindow):
         self._root = root
         self._outer = outer
         self._outer.setMouseTracking(True)
-        self._outer.installEventFilter(self)
         self._outer_layout = outer_layout
 
         outer_layout.addWidget(root)
@@ -535,7 +574,7 @@ class MainWindow(QMainWindow):
         update_btn.setObjectName("btnGhost")
         update_btn.setFixedHeight(34)
         update_btn.setStyleSheet(tutorial_btn.styleSheet())
-        update_btn.clicked.connect(lambda: check_for_updates(self, show_no_update=True))
+        update_btn.clicked.connect(self._manual_check_update)
         layout.addWidget(update_btn)
 
         about_btn = QPushButton("ℹ️ 关于")
@@ -632,7 +671,18 @@ class MainWindow(QMainWindow):
         return None
 
     def eventFilter(self, obj, event):
-        if obj is not self._outer or self._is_maximized:
+        if self._is_maximized:
+            return super().eventFilter(obj, event)
+
+        # 全局事件过滤器：只处理本窗口内控件的鼠标事件，
+        # 其他控件（对话框、菜单等）的事件一律放行。
+        if obj is None:
+            return super().eventFilter(obj, event)
+        try:
+            if isinstance(obj, QWidget) and obj.window() is not self:
+                return super().eventFilter(obj, event)
+        except RuntimeError:
+            # 目标对象已被销毁
             return super().eventFilter(obj, event)
 
         t = event.type()
@@ -658,8 +708,10 @@ class MainWindow(QMainWindow):
                     wh.startSystemResize(self._resize_edge)
                 return True
         elif t == event.Type.Leave:
-            self.setCursor(Qt.ArrowCursor)
-            self._resize_edge = None
+            gp = QCursor.pos()
+            if not self.frameGeometry().contains(gp):
+                self.setCursor(Qt.ArrowCursor)
+                self._resize_edge = None
 
         return super().eventFilter(obj, event)
 
@@ -761,9 +813,10 @@ class MainWindow(QMainWindow):
         self.page_local.setVisible(index == 1)
         self.page_online.setVisible(index == 2)
 
-        if index == 1:
+        # 仅首次进入时渲染，之后直接复用已渲染列表（数据变更会主动刷新，如安装/删除/在线数据到达）
+        if index == 1 and not getattr(self.page_local, "_rendered", False):
             QTimer.singleShot(50, lambda: self.page_local.refresh_mod_list(self.game_path))
-        if index == 2:
+        if index == 2 and not getattr(self.page_online, "_rendered", False):
             QTimer.singleShot(50, lambda: self.page_online.refresh_mod_list(self.game_path))
 
     def _create_main_page(self):
@@ -1116,6 +1169,13 @@ class MainWindow(QMainWindow):
 
     # ==================== 日志工具 ====================
     def _log(self, text, level="info"):
+        """线程安全的日志入口：可在任意线程调用，UI 更新在主线程执行"""
+        self.log_signal.emit(text, level)
+
+    def _append_log(self, text, level="info"):
+        """主线程槽函数：真正写入 log_text"""
+        if not getattr(self, "log_text", None):
+            return
         color_map = {
             "info": "#888888",
             "success": "#66bb6a",
@@ -1129,10 +1189,13 @@ class MainWindow(QMainWindow):
             f'<span style="color:#666666;">[{timestamp}]</span> '
             f'<span style="color:{color};">{text}</span>'
         )
-        self.log_text.append(html)
-
-        scrollbar = self.log_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        try:
+            self.log_text.append(html)
+            scrollbar = self.log_text.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+        except RuntimeError:
+            # 窗口已销毁，忽略
+            pass
 
     def _clear_log(self):
         self.log_text.clear()
@@ -1193,10 +1256,13 @@ class MainWindow(QMainWindow):
 
     # ==================== 游戏进程检测与停止 ====================
     def _find_game_process(self):
+        import psutil  # 延迟导入，避免拖慢启动
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'exe']):
+            # 只取 pid + name（name 匹配足够；带上 exe 可能因权限失败导致整条进程被跳过，漏检游戏进程）
+            for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    if proc.info['name'] and proc.info['name'].lower() == 'hollow_knight.exe':
+                    name = proc.info['name'] or ''
+                    if name.lower() == 'hollow_knight.exe':
                         return proc
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
@@ -1222,6 +1288,7 @@ class MainWindow(QMainWindow):
             self._launch_game()
 
     def _stop_game(self):
+        import psutil  # 延迟导入，避免拖慢启动
         if self.game_pid is None:
             proc = self._find_game_process()
             if proc is None:
@@ -1259,6 +1326,15 @@ class MainWindow(QMainWindow):
         if game_path.endswith('.exe'):
             game_path = get_root_from_exe(game_path)
 
+        # 前置检查：游戏已在运行则不再重复启动
+        # （Hollow Knight 是单实例游戏，二次启动会弹 "another instance is already running" 并退出）
+        existing = self._find_game_process()
+        if existing is not None:
+            self.game_pid = existing.info['pid']
+            self.launch_btn.update_style(True)
+            self._log(f"⚠️ 游戏已在运行 (PID {self.game_pid})，无需重复启动", "warning")
+            return
+
         try:
             import subprocess
             exe_path = os.path.join(game_path, "hollow_knight.exe")
@@ -1268,7 +1344,9 @@ class MainWindow(QMainWindow):
                 creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
             )
             self.game_pid = self.game_process.pid
+            # 立即锁定按钮为「停止游戏」状态，防止 Unity 进程出现前的窗口期重复点击
             self.launch_btn.update_style(True)
+            self._log(f"🚀 游戏已启动 (PID {self.game_pid})", "success")
         except Exception as e:
             QMessageBox.warning(self, "启动失败", str(e))
 
@@ -1326,12 +1404,34 @@ class MainWindow(QMainWindow):
             game_path = self.path_input.text()
             if game_path.endswith('.exe'):
                 game_path = get_root_from_exe(game_path)
-
-            install_mods(game_path, files, self._log)
-            QMessageBox.information(self, "完成", "Mod 安装完成")
-            QTimer.singleShot(500, lambda: self.page_local.refresh_mod_list(self.game_path))
         except Exception as e:
             QMessageBox.warning(self, "失败", str(e))
+            return
+
+        # 后台线程安装（解压 + SHA256 校验可能耗时数秒），避免冻结 UI
+        threading.Thread(target=self._install_task, args=(game_path, files), daemon=True).start()
+
+    def _install_task(self, game_path, files):
+        """后台安装任务：install_mods 的进度回调 self._log 是 Qt 信号（线程安全）"""
+        try:
+            install_mods(game_path, files, self._log)
+            self.install_finished.emit(True)
+        except Exception as e:
+            self._log(f"Mod 安装异常: {e}", "error")
+            self.install_finished.emit(False)
+
+    def _on_install_finished(self, success):
+        """安装完成（主线程）：弹窗并刷新本地列表"""
+        try:
+            if not self.isVisible():
+                return
+            if success:
+                QMessageBox.information(self, "完成", "Mod 安装完成")
+                self.page_local.refresh_mod_list(self.game_path)
+            else:
+                QMessageBox.warning(self, "失败", "Mod 安装失败，请查看日志")
+        except RuntimeError:
+            pass
 
     def _open_mods(self):
         p = self.path_input.text().strip()
@@ -1366,18 +1466,76 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._load_dependency_task, daemon=True).start()
 
     def _load_dependency_task(self):
-        success = self.resolver.load_from_url(MODLINKS_URL, self._log)
-        QTimer.singleShot(0, lambda: self._on_load_finished(success))
+        """优先用本地缓存秒开，同时后台静默刷新最新数据"""
+        try:
+            # ① 有缓存：立刻解析渲染（毫秒级，不等待网络）
+            if self.resolver.load_cached():
+                self._log("📦 已从本地缓存加载 Mod 数据，正在后台刷新最新数据...", "info")
+                self.dependency_done.emit(True)
+                # ② 后台刷新最新数据（失败保留缓存，不打扰用户）
+                threading.Thread(target=self._refresh_dependency_task, daemon=True).start()
+                return
+            # ③ 无缓存：首次必须走网络
+            success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+        except Exception as e:
+            self._log(f"Mod链接加载异常: {e}", "error")
+            success = False
+        self.dependency_done.emit(success)
+
+    def _refresh_dependency_task(self):
+        """后台刷新 Mod 数据，成功则通知 UI 更新（失败保留缓存）"""
+        try:
+            with self._dependency_lock:
+                success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+        except Exception as e:
+            self._log(f"后台刷新 Mod 数据异常: {e}", "error")
+            success = False
+        if success:
+            self._log("✅ 后台刷新完成，Mod 数据已是最新", "success")
+            self.dependency_done.emit(True)
 
     def _on_load_finished(self, success):
-        if success:
-            if self.page_online.isVisible():
+        try:
+            if not self.isVisible():
+                return
+            if success:
+                # 无论在线页当前是否可见都先渲染好，保证用户点进去秒开
                 self.page_online.refresh_mod_list(self.game_path)
-        else:
-            QMessageBox.warning(self, "错误", "Mod链接加载失败，请检查网络连接后点击「更新链接」重试")
+            else:
+                QMessageBox.warning(self, "错误", "Mod链接加载失败，请检查网络连接后点击「更新链接」重试")
+        except RuntimeError:
+            # 窗口已销毁，忽略
+            pass
+        except Exception:
+            pass
 
     def _reload_dependency(self):
-        threading.Thread(target=self._load_dependency_task, daemon=True).start()
+        """手动「更新链接」：强制联网重新拉取最新 Mod 数据，完成后弹窗反馈"""
+        self._log("🔄 正在重新拉取最新 Mod 数据...", "info")
+        threading.Thread(target=self._reload_dependency_task, daemon=True).start()
+
+    def _reload_dependency_task(self):
+        """手动刷新任务：必须走网络，忽略本地缓存"""
+        try:
+            with self._dependency_lock:
+                success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+        except Exception as e:
+            self._log(f"Mod链接加载异常: {e}", "error")
+            success = False
+        self.reload_finished.emit(success)
+
+    def _on_reload_finished(self, success):
+        """手动刷新完成（主线程）：刷新列表，仅日志反馈（不弹窗）"""
+        try:
+            if not self.isVisible():
+                return
+            if success:
+                self.page_online.refresh_mod_list(self.game_path)
+                self._log("✅ Mod 数据已更新至最新", "success")
+            else:
+                self._log("❌ Mod 数据更新失败，请检查网络连接后重试", "error")
+        except RuntimeError:
+            pass
 
     def _check_missing_dependencies(self):
         if not self._valid_path():
@@ -1443,7 +1601,12 @@ class MainWindow(QMainWindow):
         root_dlls = []
         dll_owners = {}  # dll文件名 -> [所属文件夹列表]
 
-        items = [item for item in os.listdir(mods_dir) if item != "Disabled"]
+        try:
+            items = [item for item in os.listdir(mods_dir) if item != "Disabled"]
+        except OSError as e:
+            self._log(f"❌ 无法读取 Mods 目录: {e}", "error")
+            QMessageBox.warning(self, "检查失败", f"无法读取 Mods 目录：\n{e}")
+            return
 
         for item in items:
             item_path = os.path.join(mods_dir, item)
@@ -1491,4 +1654,7 @@ class MainWindow(QMainWindow):
     # ==================== 窗口事件 ====================
     def closeEvent(self, event):
         self.monitor_timer.stop()
+        app = QApplication.instance()
+        if app:
+            app.removeEventFilter(self)
         event.accept()

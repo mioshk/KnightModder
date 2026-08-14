@@ -5,6 +5,7 @@ Hollow Knight Mod Manager (HKMM)
 """
 import sys
 import os
+import threading
 import traceback
 
 # ---------- 确保根目录在 sys.path ----------
@@ -24,6 +25,23 @@ def exception_hook(exc_type, exc_value, exc_tb):
 
 sys.excepthook = exception_hook
 
+
+# ---------- 线程异常捕获（线程崩溃不会触发 sys.excepthook） ----------
+def thread_exception_hook(args):
+    """捕获工作线程中的未处理异常，写入崩溃日志"""
+    exc_type, exc_value, exc_tb = args.exc_type, args.exc_value, args.exc_tb
+    lines = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        with open("crash.log", "w", encoding="utf-8") as f:
+            f.write("[线程异常]\n" + lines)
+    except Exception:
+        pass
+    print(lines)
+
+
+if hasattr(threading, "excepthook"):
+    threading.excepthook = thread_exception_hook
+
 # ---------- 依赖检查 ----------
 try:
     from PySide6.QtCore import Qt, QSize, QTimer
@@ -33,9 +51,14 @@ except ImportError:
     print("请安装 PySide6: pip install PySide6")
     sys.exit(1)
 
-# ---------- UI & 更新模块 ----------
+# ---------- UI 模块 ----------
 from ui import MainWindow
-from ui.update_checker import auto_check_for_updates
+
+
+def _delayed_check_update(window):
+    """延迟检查更新：函数内导入 update_checker，避免启动时加载 requests/qrcode 等重模块"""
+    from ui.update_checker import auto_check_for_updates
+    auto_check_for_updates(window)
 
 
 def main():
@@ -71,7 +94,7 @@ def main():
     QTimer.singleShot(400, window.trigger_first_run_dialog)
 
     # ✅ 启动后 3 秒静默检查更新（仅在新版本时弹窗）
-    QTimer.singleShot(3000, lambda: auto_check_for_updates(window))
+    QTimer.singleShot(3000, lambda: _delayed_check_update(window))
 
     sys.exit(app.exec())
 

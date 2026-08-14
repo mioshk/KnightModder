@@ -7,15 +7,15 @@ import os
 import json
 import shutil
 import subprocess
+import os
+import time
 import zipfile
 import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-import requests
-
-from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL
+from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL, get_base_dir
 from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir
 
 
@@ -402,18 +402,28 @@ def disable_mod(game_path, mod_name, progress_callback=None):
 
     if os.path.isdir(mod_path):
         target = os.path.join(disabled_dir, mod_name)
-        if os.path.exists(target):
-            shutil.rmtree(target)
-        shutil.move(mod_path, target)
+        try:
+            if os.path.exists(target):
+                shutil.rmtree(target)
+            shutil.move(mod_path, target)
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 禁用失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
         if progress_callback:
             progress_callback(f"⛔ 已禁用：{mod_name}", "warning")
         return True
 
     elif os.path.isfile(dll_path):
         target = os.path.join(disabled_dir, mod_name + '.dll')
-        if os.path.exists(target):
-            os.remove(target)
-        shutil.move(dll_path, target)
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+            shutil.move(dll_path, target)
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 禁用失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
         if progress_callback:
             progress_callback(f"⛔ 已禁用：{mod_name}", "warning")
         return True
@@ -452,18 +462,28 @@ def enable_mod(game_path, mod_name, progress_callback=None):
 
     if os.path.isdir(disabled_mod_path):
         target = os.path.join(mods_dir, mod_name)
-        if os.path.exists(target):
-            shutil.rmtree(target)
-        shutil.move(disabled_mod_path, target)
+        try:
+            if os.path.exists(target):
+                shutil.rmtree(target)
+            shutil.move(disabled_mod_path, target)
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 启用失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
         if progress_callback:
             progress_callback(f"✅ 已启用：{mod_name}", "success")
         return True
 
     elif os.path.isfile(disabled_dll_path):
         target = os.path.join(mods_dir, mod_name + '.dll')
-        if os.path.exists(target):
-            os.remove(target)
-        shutil.move(disabled_dll_path, target)
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+            shutil.move(disabled_dll_path, target)
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 启用失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
         if progress_callback:
             progress_callback(f"✅ 已启用：{mod_name}", "success")
         return True
@@ -498,23 +518,33 @@ def delete_mod(game_path, mod_name, progress_callback=None):
         mod_path = os.path.join(mods_dir, mod_name)
         dll_path = os.path.join(mods_dir, mod_name + '.dll')
 
-        if os.path.isdir(mod_path):
-            shutil.rmtree(mod_path)
-            deleted = True
-        elif os.path.isfile(dll_path):
-            os.remove(dll_path)
-            deleted = True
+        try:
+            if os.path.isdir(mod_path):
+                shutil.rmtree(mod_path)
+                deleted = True
+            elif os.path.isfile(dll_path):
+                os.remove(dll_path)
+                deleted = True
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 删除失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
 
     if os.path.exists(disabled_dir):
         disabled_mod_path = os.path.join(disabled_dir, mod_name)
         disabled_dll_path = os.path.join(disabled_dir, mod_name + '.dll')
 
-        if os.path.isdir(disabled_mod_path):
-            shutil.rmtree(disabled_mod_path)
-            deleted = True
-        elif os.path.isfile(disabled_dll_path):
-            os.remove(disabled_dll_path)
-            deleted = True
+        try:
+            if os.path.isdir(disabled_mod_path):
+                shutil.rmtree(disabled_mod_path)
+                deleted = True
+            elif os.path.isfile(disabled_dll_path):
+                os.remove(disabled_dll_path)
+                deleted = True
+        except OSError as e:
+            if progress_callback:
+                progress_callback(f"❌ 删除失败（文件被占用或无权限）：{mod_name} - {e}", "error")
+            return False
 
     if deleted:
         remove_mod_metadata(game_path, mod_name)
@@ -557,6 +587,9 @@ def is_mod_enabled(game_path, mod_name):
 class DependencyResolver:
     """Mod依赖解析器"""
 
+    # 缓存有效期：6 小时内直接用缓存秒开，后台再静默刷新
+    CACHE_TTL = 6 * 3600
+
     def __init__(self):
         self.dependency_map = {}      # mod_name -> 依赖列表
         self.link_map = {}            # mod_name -> 单个下载链接
@@ -565,6 +598,39 @@ class DependencyResolver:
         self.is_loaded = False
         self.mod_data = []
         self.mod_data_by_name = {}
+
+    # ---------- 本地缓存（避免每次启动都等网络） ----------
+    @staticmethod
+    def _cache_file() -> str:
+        """缓存文件路径：优先用户 AppData，fallback 到程序目录"""
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "KnightModder")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            d = get_base_dir()
+        return os.path.join(d, "ModLinksCN.xml")
+
+    def save_cache(self, content: bytes) -> bool:
+        """保存 Mod 链接 XML 到本地缓存"""
+        try:
+            with open(self._cache_file(), "wb") as f:
+                f.write(content)
+            return True
+        except OSError:
+            return False
+
+    def load_cached(self, progress_callback: Optional[Callable] = None) -> bool:
+        """从本地缓存加载（不联网），成功返回 True"""
+        try:
+            path = self._cache_file()
+            if not os.path.isfile(path):
+                return False
+            with open(path, "rb") as f:
+                content = f.read()
+            return self._parse_xml_content(content, progress_callback)
+        except OSError:
+            return False
 
     def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None) -> bool:
         """
@@ -576,12 +642,17 @@ class DependencyResolver:
         if url is None:
             url = MODLINKS_URL
 
+        import requests  # 延迟导入，避免拖慢启动
+
         try:
             if progress_callback:
                 progress_callback("🔍 正在从网络加载 Mod 链接...", "info")
 
             response = requests.get(url, timeout=15)
             response.raise_for_status()
+
+            # 写入本地缓存，下次启动直接秒开
+            self.save_cache(response.content)
 
             if progress_callback:
                 progress_callback("📥 正在解析 Mod 数据...", "info")

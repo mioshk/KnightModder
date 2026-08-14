@@ -151,6 +151,9 @@ def find_hollow_knight_exe():
             os.path.join(pf, "Steam"),
         ])
         for d in ["D:", "E:", "F:", "G:"]:
+            # 跳过不存在的盘符（光驱、未挂载盘会导致 isdir 极慢）
+            if not os.path.exists(d + ":\\"):
+                continue
             steam_paths.append(os.path.join(d, "SteamLibrary"))
             steam_paths.append(os.path.join(d, "Steam"))
 
@@ -190,6 +193,8 @@ def find_hollow_knight_exe():
             normalize_path(os.path.join(pf, "GOG Galaxy", "Games", "Hollow Knight")),
         ])
         for d in ["D:", "E:", "F:", "G:"]:
+            if not os.path.exists(d + ":\\"):
+                continue
             gog_paths.append(normalize_path(os.path.join(d, "GOG Games", "Hollow Knight")))
             gog_paths.append(normalize_path(os.path.join(d, "GOG Galaxy", "Games", "Hollow Knight")))
 
