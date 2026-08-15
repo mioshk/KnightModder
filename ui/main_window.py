@@ -31,6 +31,8 @@ from config import (
     APP_NAME,
     MANAGED_RELATIVE_PATH,
     MODLINKS_URL,
+    STEAM_APPID,
+    STEAM_RUN_URL,
     COLOR_BG,
     COLOR_BORDER,
     COLOR_ACCENT_GREEN,
@@ -52,7 +54,10 @@ from utils import (
     save_path,
     normalize_path,
     get_root_from_exe,
+    get_asset_path,
     get_mods_dir,
+    is_unity_mutex_held,
+    is_steam_official_path,
     get_save_folder,
     get_api_zip_path,
     find_hollow_knight_exe,
@@ -313,6 +318,8 @@ class MainWindow(QMainWindow):
         self.setWindowFlag(Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setWindowTitle(APP_NAME)
+        # 窗口图标（无边框窗口也需显式设置，否则任务栏无图标）
+        self.setWindowIcon(QIcon(get_asset_path("icon.ico")))
 
         screen = QApplication.primaryScreen()
         screen_size = screen.size() if screen else QSize(1920, 1080)
@@ -1346,6 +1353,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "错误", f"停止游戏失败: {e}")
 
+    def _is_steam_version(self, game_path):
+        """判断用户选择的目录是否为 Steam 官方安装目录（与 Steam 库为 AppID
+        注册的安装位置一致）。只有官方目录才走 steam:// 启动；自定义副本
+        （哪怕放在 steamapps\\common 下）必须直启用户指定的 exe，否则
+        steam:// 会无视选择、永远启动 Steam 库里的官方版。"""
+        return is_steam_official_path(game_path, STEAM_APPID)
+
     def _launch_game(self):
         if not self._valid_path():
             return
@@ -1361,13 +1375,32 @@ class MainWindow(QMainWindow):
             return
         self._last_launch_ts = now
 
-        # 前置检查：游戏已在运行则不再重复启动
+        # 前置检查 ①：游戏进程已在运行则不再重复启动
         # （Hollow Knight 是单实例游戏，二次启动会弹 "another instance is already running" 并退出）
         existing = self._find_game_process()
         if existing is not None:
             self.game_pid = existing.info['pid']
             self.launch_btn.update_style(True)
-            self._log(f"⚠️ 检测到游戏已在运行 (PID {self.game_pid})，无需重复启动", "warning")
+            self._log(f"⚠️ 检测到游戏进程已在运行 (PID {self.game_pid})，无法重复启动", "warning")
+            self._prompt_open_with_steam(f"检测到游戏进程已在运行（PID {self.game_pid}）")
+            return
+
+        # 前置检查 ②：Unity 单实例 Mutex 探测
+        # 能发现"无可见进程但锁被占用"的隐藏/挂起/残留实例（杀软挂起、其他会话残留等）
+        mutex_name = is_unity_mutex_held()
+        if mutex_name is not None:
+            self.launch_btn.update_style(True)
+            self._log("⚠️ 检测到游戏单实例锁已被占用，游戏可能已在后台/隐藏运行，无法重复启动", "warning")
+            self._prompt_open_with_steam("检测到游戏单实例锁已被占用")
+            return
+
+        # Steam 版游戏必须经 Steam 启动，否则 Steamworks DRM 会让游戏主动退出并尝试
+        # 通过 Steam 重启自己（Player.log 记录 "Application was not launched through
+        # Steam! Shutting down..."），造成双实例撞 Unity 单实例锁 → 弹 "another instance
+        # is already running"。Popen 直启正是弹窗根因，故 Steam 版改走 steam:// 协议。
+        if self._is_steam_version(game_path):
+            self.launch_btn.update_style(True)
+            self._open_with_steam()
             return
 
         try:
@@ -1382,8 +1415,60 @@ class MainWindow(QMainWindow):
             # 立即锁定按钮为「停止游戏」状态，防止 Unity 进程出现前的窗口期重复点击
             self.launch_btn.update_style(True)
             self._log(f"🚀 游戏已启动 (PID {self.game_pid})", "success")
+            # 启动后存活验证（兜底）：若游戏因单实例锁/杀软拦截而秒退，及时提示
+            self._verify_game_survival(exe_path)
         except Exception as e:
             QMessageBox.warning(self, "启动失败", str(e))
+
+    def _verify_game_survival(self, exe_path, delay=6.0):
+        """启动后延迟验证游戏进程是否存活（兜底检测）。
+
+        正常启动时 hollow_knight.exe 会在 1~2 秒内常驻；
+        若进程在 delay 秒后已消失，说明被单实例锁挡住（another instance）或被杀软拦截，
+        此时通过日志提醒用户，避免用户误以为启动失败而反复点击。
+        """
+
+        def _check():
+            import time as _t
+            _t.sleep(delay)
+            try:
+                import subprocess
+                out = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                alive = any('hollow_knight.exe' in line.lower() for line in out.stdout.splitlines())
+                if not alive:
+                    self._log("⚠️ 游戏启动后短时间内退出了，可能是已有其他实例在运行，或被杀毒软件拦截", "warning")
+            except Exception:
+                pass
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _prompt_open_with_steam(self, reason):
+        """游戏被占用时：弹窗提示改用 Steam 启动（Steam 自己会处理单实例）"""
+        box = QMessageBox(self)
+        box.setWindowTitle("游戏已被占用")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"{reason}，无法重复启动。\n\n"
+            "建议：先退出占用的游戏实例，再在 Steam 库中启动《空洞骑士》。"
+        )
+        steam_btn = box.addButton("用 Steam 打开游戏", QMessageBox.AcceptRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is steam_btn:
+            self._open_with_steam()
+
+    def _open_with_steam(self):
+        """通过 Steam 协议直接启动《空洞骑士》（Steam AppID: 367520）"""
+        try:
+            os.startfile(STEAM_RUN_URL)
+            self._log("🎮 已请求 Steam 启动《空洞骑士》", "success")
+        except Exception as e:
+            self._log(f"❌ 无法唤起 Steam：{e}", "error")
+            QMessageBox.warning(self, "启动失败", f"无法唤起 Steam：{e}\n请手动打开 Steam 库启动游戏。")
 
     # ==================== 功能按钮回调 ====================
     def _install_api(self):

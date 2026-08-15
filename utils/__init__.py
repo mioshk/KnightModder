@@ -12,9 +12,13 @@ from utils.common import (
     save_path,
     normalize_path,
     get_root_from_exe,
+    get_asset_path,
     get_mods_dir,
+    is_unity_mutex_held,
     get_disabled_dir,
     get_metadata_path,
     get_game_exe_path,
     find_hollow_knight_exe,
+    get_steam_app_install_dir,
+    is_steam_official_path,
 )

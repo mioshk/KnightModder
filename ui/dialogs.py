@@ -6,8 +6,6 @@
 import os
 import re
 
-from utils.common import safe_requests_get
-
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -24,7 +22,9 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTextBrowser,
 )
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon
+
+from utils.common import safe_requests_get, get_asset_path
 
 from config import (
     APP_NAME,
@@ -40,10 +40,19 @@ from config import (
 from ui.styles import DARK_STYLE_SHEET
 
 
+def _apply_icon(dialog):
+    """为对话框设置应用图标（避免任务栏/标题栏无图标）"""
+    try:
+        dialog.setWindowIcon(QIcon(get_asset_path("icon.ico")))
+    except Exception:
+        pass
+
+
 def show_about_dialog(parent):
     """显示关于对话框"""
     dialog = QDialog(parent)
     dialog.setWindowTitle("关于")
+    _apply_icon(dialog)
     dialog.setFixedWidth(360)
     dialog.setStyleSheet(DARK_STYLE_SHEET)
 
@@ -98,6 +107,7 @@ def show_path_select_dialog(parent, paths_data):
     """
     dialog = QDialog(parent)
     dialog.setWindowTitle("选择游戏安装目录")
+    _apply_icon(dialog)
     dialog.setMinimumWidth(500)
     dialog.setMinimumHeight(350)
     dialog.setStyleSheet(DARK_STYLE_SHEET)
@@ -149,6 +159,7 @@ def show_missing_deps_dialog(parent, missing_deps, resolver):
     """
     dialog = QDialog(parent)
     dialog.setWindowTitle("缺失的前置依赖")
+    _apply_icon(dialog)
     dialog.setMinimumSize(600, 450)
     dialog.setStyleSheet(DARK_STYLE_SHEET)
 
@@ -261,6 +272,7 @@ def show_mod_errors_dialog(parent, errors):
     """
     dialog = QDialog(parent)
     dialog.setWindowTitle("Mod 错误检查报告")
+    _apply_icon(dialog)
     dialog.setMinimumSize(600, 450)
     dialog.setStyleSheet(DARK_STYLE_SHEET)
 
@@ -412,6 +424,7 @@ class AboutMarkdownDialog(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle(self.dialog_title)
+        _apply_icon(self)
         self.setMinimumSize(580, 480)
         self.setStyleSheet("""
             QDialog {

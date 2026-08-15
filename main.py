@@ -45,11 +45,13 @@ if hasattr(threading, "excepthook"):
 # ---------- 依赖检查 ----------
 try:
     from PySide6.QtCore import Qt, QSize, QTimer
-    from PySide6.QtGui import QFont
+    from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
 except ImportError:
     print("请安装 PySide6: pip install PySide6")
     sys.exit(1)
+
+from utils.common import get_asset_path
 
 # ---------- UI 模块 ----------
 from ui import MainWindow
@@ -71,6 +73,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # 任务栏/标题栏图标（打包后从 _MEIPASS 读取，源码运行从项目目录读取）
+    app.setWindowIcon(QIcon(get_asset_path("icon.ico")))
 
     # 根据屏幕分辨率动态计算窗口和字体大小
     screen = app.primaryScreen()

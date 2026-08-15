@@ -8,10 +8,15 @@ import sys
 
 # ---------- 应用基本信息 ----------
 APP_NAME = "KnightModder 骑士模组师"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 
 # 更新检查
 UPDATE_CHECK_URL = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@latest/version.json"
+
+# ---------- Steam 相关 ----------
+# 《空洞骑士》Steam AppID 与启动协议
+STEAM_APPID = "367520"
+STEAM_RUN_URL = "steam://rungameid/367520"
 
 # ---------- 路径相关常量 ----------
 API_FOLDER_NAME = "API"

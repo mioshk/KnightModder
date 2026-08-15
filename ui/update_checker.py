@@ -2,13 +2,13 @@
 """检查更新 - 夸克网盘分发（防双弹窗版）"""
 import io
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
-from PySide6.QtGui import QPixmap, QFont
+from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QMessageBox, QProgressBar, QWidget, QScrollArea,
 )
 from config import APP_VERSION, UPDATE_CHECK_URL
-from utils.common import safe_requests_get
+from utils.common import safe_requests_get, get_asset_path
 
 
 # ==================== 全局状态 ====================
@@ -56,6 +56,7 @@ class UpdateDialog(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("发现新版本")
+        self.setWindowIcon(QIcon(get_asset_path("icon.ico")))
         self.setMinimumSize(420, 500)
         self.setStyleSheet("QDialog{background-color:#1a1a1a;}")
 

@@ -15,8 +15,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL, MODLINKS_BACKUP_URL, get_base_dir
-from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir, safe_requests_get
+from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL, MODLINKS_BACKUP_URL, STEAM_APPID, STEAM_RUN_URL, get_base_dir
+from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir, safe_requests_get, is_steam_official_path
 
 
 # ==================== 文件工具函数 ====================
@@ -363,6 +363,16 @@ def launch_game(game_path, progress_callback=None):
         raise FileNotFoundError(f"未找到 hollow_knight.exe：{game_path}")
 
     try:
+        # 仅当用户选择的是 Steam 官方安装目录（与 Steam 库注册的 AppID 安装位置
+        # 一致）才经 Steam 启动：Popen 直启官方版会触发 Steamworks DRM 让游戏退出
+        # 并重启自己，造成双实例撞单实例锁弹 "another instance is already running"。
+        # 自定义副本（哪怕放在 steamapps\\common 下）必须直启用户指定目录，否则
+        # steam:// 会无视选择、永远启动 Steam 库里的官方版。
+        if is_steam_official_path(game_path, STEAM_APPID):
+            os.startfile(STEAM_RUN_URL)
+            if progress_callback:
+                progress_callback("✅ 已请求 Steam 启动游戏", "success")
+            return
         subprocess.Popen([exe_path], cwd=game_path)
         if progress_callback:
             progress_callback("✅ 游戏已启动", "success")
