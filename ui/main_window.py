@@ -1234,8 +1234,18 @@ class MainWindow(QMainWindow):
             self._commit_path(game_path)
 
     def _browse_exe(self):
-        last_path = self.settings.value("game_exe_path", "")
-        last_dir = os.path.dirname(last_path) if last_path else ""
+        # 以 config.json 保存的路径为权威（当前版本唯一持久化渠道）。
+        # QSettings 的 game_exe_path 是旧版本遗留且从不写入，值可能已过时
+        # （曾指向已不使用的自定义副本目录），只作最后兜底。
+        saved = self.game_path or load_saved_path()
+        if not saved:
+            saved = self.settings.value("game_exe_path", "")
+        if saved:
+            if saved.lower().endswith(".exe"):
+                saved = get_root_from_exe(saved)
+            last_dir = saved
+        else:
+            last_dir = ""
 
         file_path, _ = QFileDialog.getOpenFileName(
             self, "选择 hollow_knight.exe",
