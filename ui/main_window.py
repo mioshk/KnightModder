@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 from config import (
     APP_NAME,
     MANAGED_RELATIVE_PATH,
-    MODLINKS_URL,
+    USAGE_URL_CDN,
+    USAGE_URL_RAW,
     STEAM_APPID,
     STEAM_RUN_URL,
     COLOR_BG,
@@ -729,8 +730,7 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _show_usage_md(self):
-        usage_url = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@main/USAGE.md"
-        dialog = AboutMarkdownDialog(self, url=usage_url, title="使用教程")
+        dialog = AboutMarkdownDialog(self, url=USAGE_URL_CDN, url_raw=USAGE_URL_RAW, title="使用教程")
         dialog.exec()
 
     def _create_nav_bar(self):
@@ -1606,7 +1606,7 @@ class MainWindow(QMainWindow):
                 threading.Thread(target=self._refresh_dependency_task, daemon=True).start()
                 return
             # ③ 无缓存：首次必须走网络
-            success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+            success = self.resolver.load_from_url(progress_callback=self._log)
         except Exception as e:
             self._log(f"Mod链接加载异常: {e}", "error")
             success = False
@@ -1616,7 +1616,7 @@ class MainWindow(QMainWindow):
         """后台刷新 Mod 数据，成功则通知 UI 更新（失败保留缓存）"""
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+                success = self.resolver.load_from_url(progress_callback=self._log)
         except Exception as e:
             self._log(f"后台刷新 Mod 数据异常: {e}", "error")
             success = False
@@ -1648,7 +1648,7 @@ class MainWindow(QMainWindow):
         """手动刷新任务：必须走网络，忽略本地缓存"""
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(MODLINKS_URL, self._log)
+                success = self.resolver.load_from_url(progress_callback=self._log)
         except Exception as e:
             self._log(f"Mod链接加载异常: {e}", "error")
             success = False

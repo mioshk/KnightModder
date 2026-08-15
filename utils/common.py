@@ -328,6 +328,48 @@ def safe_requests_get(url, timeout=10, fallback_on_ssl=True, ssl_warn_callback=N
         return requests.get(url, timeout=timeout, verify=False, **kwargs)
 
 
+def fetch_remote_content(cdn_url, raw_url, timeout=10, ssl_warn_callback=None):
+    """
+    多源容灾读取远程文件内容（字节）。
+
+    1. 先读 CDN 加速链接
+    2. CDN 读不到 → 读 GitHub raw 原链接
+    3. 两者都能读到但内容不一致 → 说明 CDN 缓存未刷新，采用 raw 内容
+
+    返回 (content_bytes, source)；全部失败返回 (None, "")。
+    source 取值："cdn" / "github-raw"。
+    """
+    cdn_content = None
+    raw_content = None
+
+    if cdn_url:
+        try:
+            resp = safe_requests_get(cdn_url, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
+            if resp.status_code == 200:
+                cdn_content = resp.content
+        except Exception:
+            pass
+
+    if raw_url:
+        try:
+            resp = safe_requests_get(raw_url, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
+            if resp.status_code == 200:
+                raw_content = resp.content
+        except Exception:
+            pass
+
+    if cdn_content is None and raw_content is None:
+        return None, ""
+    if raw_content is None:
+        return cdn_content, "cdn"
+    if cdn_content is None:
+        return raw_content, "github-raw"
+    # 两者都成功：一致用 CDN；不一致说明 CDN 缓存未刷新，用 raw
+    if cdn_content == raw_content:
+        return cdn_content, "cdn"
+    return raw_content, "github-raw"
+
+
 # ============================================================
 # Unity 单实例 Mutex 探测（Hollow Knight 单实例机制）
 # ============================================================

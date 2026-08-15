@@ -24,10 +24,13 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QFont, QIcon
 
-from utils.common import safe_requests_get, get_asset_path
+from utils.common import fetch_remote_content, get_asset_path
 
 from config import (
     APP_NAME,
+    AUTHOR_URL,
+    README_URL_CDN,
+    README_URL_RAW,
     COLOR_ACCENT_BLUE,
     COLOR_ACCENT_RED,
     COLOR_ACCENT_ORANGE,
@@ -79,7 +82,7 @@ def show_about_dialog(parent):
     # 作者
     author_label = QLabel(
         '作者：B站 '
-        '<a href="https://space.bilibili.com/538844794" '
+        f'<a href="{AUTHOR_URL}" '
         f'style="color:{COLOR_ACCENT_BLUE}; text-decoration:none; font-weight:bold;">[MioSs-]</a>'
     )
     author_label.setTextFormat(Qt.RichText)
@@ -394,14 +397,13 @@ def show_mod_errors_dialog(parent, errors):
 # ============================================================
 
 class AboutMarkdownDialog(QDialog):
-    """从远程加载 Markdown 并渲染的对话框"""
+    """从远程加载 Markdown 并渲染的对话框（CDN 优先，GitHub raw 兜底）"""
 
-    REMOTE_URL = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@main/README.md"
-
-    def __init__(self, parent=None, url=None, title="关于"):
+    def __init__(self, parent=None, url=None, url_raw=None, title="关于"):
         super().__init__(parent)
         self.parent = parent
-        self.remote_url = url if url else self.REMOTE_URL
+        self.remote_url = url if url else README_URL_CDN
+        self.remote_raw_url = url_raw if url_raw else README_URL_RAW
         self.dialog_title = title
         self.loader = None
         self._setup_ui()
@@ -487,7 +489,7 @@ class AboutMarkdownDialog(QDialog):
         self.content_area.setHtml('<div style="color:#888888; text-align:center; padding:40px 0;">加载中...</div>')
         self.version_label.setText("加载中...")
 
-        self.loader = MdLoader(self.remote_url)
+        self.loader = MdLoader(self.remote_url, self.remote_raw_url)
         self.loader.finished.connect(self._on_content_loaded)
         self.loader.start()
 
@@ -520,20 +522,20 @@ class AboutMarkdownDialog(QDialog):
 
 
 class MdLoader(QThread):
-    """后台线程加载远程 Markdown"""
+    """后台线程加载远程 Markdown（CDN 优先，GitHub raw 兜底）"""
     finished = Signal(bool, str)
 
-    def __init__(self, url):
+    def __init__(self, url, url_raw):
         super().__init__()
         self.url = url
+        self.url_raw = url_raw
 
     def run(self):
-        import requests  # 延迟导入
         try:
-            response = safe_requests_get(self.url, timeout=10)
-            if response.status_code == 200:
-                self.finished.emit(True, response.text)
-            else:
+            content, _ = fetch_remote_content(self.url, self.url_raw, timeout=10)
+            if content is None:
                 self.finished.emit(False, "")
+                return
+            self.finished.emit(True, content.decode("utf-8", errors="replace"))
         except Exception:
             self.finished.emit(False, "")

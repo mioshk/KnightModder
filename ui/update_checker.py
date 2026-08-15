@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """检查更新 - 夸克网盘分发（防双弹窗版）"""
 import io
+import json
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QMessageBox, QProgressBar, QWidget, QScrollArea,
 )
-from config import APP_VERSION, UPDATE_CHECK_URL
-from utils.common import safe_requests_get, get_asset_path
+from config import APP_VERSION, UPDATE_CHECK_URL_CDN, UPDATE_CHECK_URL_RAW
+from utils.common import safe_requests_get, fetch_remote_content, get_asset_path
 
 
 # ==================== 全局状态 ====================
@@ -24,17 +25,17 @@ class UpdateChecker(QThread):
 
     def __init__(self):
         super().__init__()
-        self.url = UPDATE_CHECK_URL
+        self.url_cdn = UPDATE_CHECK_URL_CDN
+        self.url_raw = UPDATE_CHECK_URL_RAW
 
     def run(self):
-        import requests  # 延迟导入
         from packaging.version import parse as parse_version  # 延迟导入
         try:
-            r = safe_requests_get(self.url, timeout=10)
-            if r.status_code != 200:
-                self.finished.emit(False, {}, f"HTTP {r.status_code}")
+            content, _ = fetch_remote_content(self.url_cdn, self.url_raw, timeout=10)
+            if content is None:
+                self.finished.emit(False, {}, "所有源均获取失败")
                 return
-            data = r.json()
+            data = json.loads(content.decode("utf-8", errors="replace"))
             ver = data.get('version', '')
             if not ver:
                 self.finished.emit(False, {}, "版本信息格式错误")

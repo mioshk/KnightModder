@@ -10,9 +10,6 @@ import sys
 APP_NAME = "KnightModder 骑士模组师"
 APP_VERSION = "1.3.2"
 
-# 更新检查
-UPDATE_CHECK_URL = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@latest/version.json"
-
 # ---------- Steam 相关 ----------
 # 《空洞骑士》Steam AppID 与启动协议
 STEAM_APPID = "367520"
@@ -25,10 +22,30 @@ MANAGED_RELATIVE_PATH = r"hollow_knight_Data\Managed"
 CONFIG_FILE = "config.json"
 
 # ---------- 网络资源 URL ----------
-# 主源：jsDelivr CDN
-MODLINKS_URL = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@latest/ModLinksCN.xml"
-# 备用源：jsDelivr 拉取失败时回退到 GitHub raw
-MODLINKS_BACKUP_URL = "https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml"
+# 每个 GitHub 仓库文件均提供双源：
+#   *_CDN = jsDelivr CDN 加速地址（优先读取）
+#   *_RAW = GitHub raw 原地址（CDN 拉取失败 / 缓存未刷新时兜底）
+# 统一经 utils.common.fetch_remote_content() 读取：先读 CDN，读不到就读
+# raw；两者内容不一致说明 CDN 缓存未刷新，采用 raw 的内容。
+GH_RAW_BASE = "https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main"
+GH_CDN_BASE = "https://cdn.jsdelivr.net/gh/mioshk/KnightModder@main"
+
+# 作者主页（B 站）
+AUTHOR_URL = "https://space.bilibili.com/538844794"
+
+# 更新检查（version.json）
+UPDATE_CHECK_URL_CDN = f"{GH_CDN_BASE}/version.json"
+UPDATE_CHECK_URL_RAW = f"{GH_RAW_BASE}/version.json"
+
+# 在线模组链接（ModLinksCN.xml）
+MODLINKS_URL_CDN = f"{GH_CDN_BASE}/ModLinksCN.xml"
+MODLINKS_URL_RAW = f"{GH_RAW_BASE}/ModLinksCN.xml"
+
+# Markdown 文档（关于 / 使用教程）
+README_URL_CDN = f"{GH_CDN_BASE}/README.md"
+README_URL_RAW = f"{GH_RAW_BASE}/README.md"
+USAGE_URL_CDN = f"{GH_CDN_BASE}/USAGE.md"
+USAGE_URL_RAW = f"{GH_RAW_BASE}/USAGE.md"
 
 # ---------- API 压缩包平台映射 ----------
 API_ZIP_MAP = {
