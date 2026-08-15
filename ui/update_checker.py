@@ -188,6 +188,22 @@ class UpdateDialog(QDialog):
         main.addWidget(scroll)
 
     def _gen_qrcode(self):
+        """生成二维码：优先使用 quark_qr_code 指定的现成图片 URL，
+        缺失或加载失败时回退用 quark_link 现场生成。"""
+        # ① 优先：现成二维码图片 URL（如 jsDelivr 托管的 png）
+        img_url = self.version_info.get('quark_qr_code', '')
+        if img_url:
+            try:
+                r = safe_requests_get(img_url, timeout=10)
+                if r.status_code == 200:
+                    p = QPixmap()
+                    p.loadFromData(r.content)
+                    if not p.isNull():
+                        return p
+            except Exception:
+                pass
+
+        # ② 兜底：用 quark_link 现场生成
         import qrcode  # 延迟导入
         try:
             link = self.version_info.get('quark_link', '')
