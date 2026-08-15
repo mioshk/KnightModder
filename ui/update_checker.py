@@ -33,7 +33,7 @@ class UpdateChecker(QThread):
         try:
             content, _ = fetch_remote_content(self.url_cdn, self.url_raw, timeout=10)
             if content is None:
-                self.finished.emit(False, {}, "所有源均获取失败")
+                self.finished.emit(False, {}, "网络请求失败")
                 return
             data = json.loads(content.decode("utf-8", errors="replace"))
             ver = data.get('version', '')

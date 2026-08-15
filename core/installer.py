@@ -662,17 +662,17 @@ class DependencyResolver:
                 content = response.content
             else:
                 if progress_callback:
-                    progress_callback("🔍 正在从 CDN 加速源加载 Mod 链接...", "info")
+                    progress_callback("🔍 正在获取最新的 Mod 数据...", "info")
                 content, source = fetch_remote_content(
                     MODLINKS_URL_CDN, MODLINKS_URL_RAW, timeout=15,
                     ssl_warn_callback=lambda msg: progress_callback(msg, "warning") if progress_callback else None
                 )
                 if content is None:
                     if progress_callback:
-                        progress_callback("❌ 所有源均拉取失败", "error")
+                        progress_callback("❌ 网络请求失败，请检查网络连接", "error")
                     return False
                 if source == "github-raw" and progress_callback:
-                    progress_callback("⚠️ CDN 缓存未刷新，已改用 GitHub 原链接", "warning")
+                    progress_callback("⚠️ 检测到远程数据未同步，已自动使用最新数据", "warning")
 
             if progress_callback:
                 progress_callback("📥 正在解析 Mod 数据...", "info")
