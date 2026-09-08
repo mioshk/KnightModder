@@ -36,22 +36,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Build with PyInstaller
-        run: python build.py
-
-      - name: Sign (macOS)
-        # 用 entitlements 做 ad-hoc 签名 + 强化运行时（hardened runtime），
-        # 保证 QtWebEngine 在本机/受信任设备可直接运行（分发给他人仍需 Developer ID + notarization）
+      # macOS: 同时构建 arm64 + x86_64，合并为 universal2（兼容 Intel 与 Apple Silicon）
+      - name: Build universal2 (macOS)
         if: matrix.os == 'macos-latest'
+        shell: bash
         run: |
-          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder
+          # 构建 arm64（原生，当前 runner 即 arm64）
+          python build.py
+          mv dist/KnightModder dist/KnightModder-arm64
+          rm -rf build dist
+
+          # 构建 x86_64（Rosetta 交叉编译）
+          arch -x86_64 /usr/bin/python3 build.py
+          mv dist/KnightModder dist/KnightModder-x86_64
+
+          # 合并为 universal2 二进制
+          lipo -create dist/KnightModder-arm64 dist/KnightModder-x86_64 -output dist/KnightModder-macos
+          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder-macos
+          file dist/KnightModder-macos
+
+      - name: Build (Windows / Linux)
+        if: matrix.os != 'macos-latest'
+        run: python build.py
 
       - name: Rename per platform
         shell: bash
         run: |
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            mv dist/KnightModder dist/KnightModder-macos
-          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
             mv dist/KnightModder dist/KnightModder-linux
           fi
 
