@@ -36,14 +36,10 @@ def main():
     cmd = [
         sys.executable, "-m", "PyInstaller",
         f"--name={APP_NAME}",
+        "--onefile",
+        "--windowed",
         "--noconfirm",
     ]
-    # macOS: 用 --windowed 但不用 --onefile → 产出 .app bundle（目录）
-    # 其它平台: --onefile + --windowed → 产单文件 exe / ELF
-    if sys.platform == "darwin":
-        cmd.append("--windowed")
-    else:
-        cmd += ["--onefile", "--windowed"]
     for imp in HIDDEN_IMPORTS:
         cmd.append(f"--hidden-import={imp}")
     # 收集 QtWebEngine 运行所需的二进制与资源（进程助手、翻译、资源等）

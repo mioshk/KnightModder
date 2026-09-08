@@ -40,11 +40,20 @@ jobs:
         run: python build.py
 
       - name: Sign (macOS)
-        # 用 entitlements 做 ad-hoc 重签 + 强化运行时（hardened runtime），
+        # 用 entitlements 做 ad-hoc 签名 + 强化运行时（hardened runtime），
         # 保证 QtWebEngine 在本机/受信任设备可直接运行（分发给他人仍需 Developer ID + notarization）
         if: matrix.os == 'macos-latest'
         run: |
-          find dist -name '*.app' -exec codesign --force --deep --options runtime --sign - --entitlements entitlements.plist {} \;
+          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder
+
+      - name: Rename per platform
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            mv dist/KnightModder dist/KnightModder-macos
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            mv dist/KnightModder dist/KnightModder-linux
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -52,8 +61,8 @@ jobs:
           name: KnightModder-${{ matrix.os }}
           path: |
             dist/KnightModder.exe
-            dist/KnightModder.app
-            dist/KnightModder
+            dist/KnightModder-macos
+            dist/KnightModder-linux
           if-no-files-found: ignore
 
   release:
@@ -73,9 +82,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p upload
-          [ -f artifacts/KnightModder.exe ] && cp artifacts/KnightModder.exe upload/KnightModder-windows.exe
-          [ -d artifacts/KnightModder.app ] && cp -R artifacts/KnightModder.app upload/KnightModder-macos.app
-          [ -f artifacts/KnightModder ]      && cp artifacts/KnightModder      upload/KnightModder-linux
+          [ -f artifacts/KnightModder.exe ]    && cp artifacts/KnightModder.exe    upload/KnightModder-windows.exe
+          [ -f artifacts/KnightModder-macos ]  && cp artifacts/KnightModder-macos  upload/KnightModder-macos
+          [ -f artifacts/KnightModder-linux ]  && cp artifacts/KnightModder-linux  upload/KnightModder-linux
           ls -la upload
 
       - name: Create GitHub Release
