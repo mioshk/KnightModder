@@ -36,32 +36,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      # macOS: 在 arm64 runner 上用 Rosetta 交叉编译 x86_64，再合并为 universal2
-      - name: Build universal2 (macOS)
+      - name: Build with PyInstaller
+        run: python build.py
+
+      - name: Sign (macOS)
+        # ad-hoc 签名 + 强化运行时；Intel Mac 用户通过 Rosetta 自动翻译运行 arm64
         if: matrix.os == 'macos-latest'
-        shell: bash
         run: |
-          # 1) 安装 x86_64 Python（universal2 安装包，可经 Rosetta 以 x86_64 运行）
-          curl -sLO https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg
-          sudo installer -pkg python-3.11.9-macos11.pkg -target /
-          X86_PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
-          arch -x86_64 "$X86_PY" -m pip install -U pip
-          # 强制拉 x86_64 轮子，否则 arm64 机器上 pip 默认装 arm64 包，PyInstaller 会报架构不兼容
-          arch -x86_64 "$X86_PY" -m pip install --platform macosx_10_9_x86_64 --only-binary=:all: -r requirements.txt pyinstaller
-
-          # 2) 构建 x86_64
-          arch -x86_64 "$X86_PY" build.py
-          mv dist/KnightModder dist/KnightModder-x86_64
-          rm -rf build dist
-
-          # 3) 构建 arm64（原生）
-          python build.py
-          mv dist/KnightModder dist/KnightModder-arm64
-
-          # 4) 合并 + 签名
-          lipo -create dist/KnightModder-arm64 dist/KnightModder-x86_64 -output dist/KnightModder-macos
-          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder-macos
-          file dist/KnightModder-macos
+          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder
+          mv dist/KnightModder dist/KnightModder-macos
 
       - name: Rename (Linux)
         if: matrix.os == 'ubuntu-latest'
