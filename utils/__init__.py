@@ -5,8 +5,6 @@ utils 包 - 通用工具模块
 
 from utils.common import (
     get_system_type,
-    get_api_zip_path,
-    get_api_folder_path,
     get_download_dir,
     get_save_folder,
     load_saved_path,

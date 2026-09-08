@@ -10,7 +10,7 @@ import sys
 
 from config import (
     CONFIG_FILE, MODS_RELATIVE_PATH,
-    API_ZIP_MAP, API_FOLDER_NAME,
+    API_ZIP_MAP,
     STEAM_APPID, DOWNLOAD_DIR_NAME,
     get_base_dir,
 )
@@ -22,20 +22,6 @@ from config import (
 def get_system_type():
     """获取当前操作系统类型"""
     return platform.system()
-
-
-def get_api_zip_path():
-    """获取API压缩包文件路径"""
-    system = get_system_type()
-    zname = API_ZIP_MAP.get(system)
-    if not zname:
-        raise RuntimeError(f"不支持的系统：{system}")
-    return os.path.join(get_base_dir(), API_FOLDER_NAME, zname)
-
-
-def get_api_folder_path():
-    """获取 API 文件夹路径"""
-    return os.path.join(get_base_dir(), API_FOLDER_NAME)
 
 
 def get_download_dir():
