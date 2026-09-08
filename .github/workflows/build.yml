@@ -18,7 +18,7 @@ jobs:
         include:
           - os: windows-latest
             py: '3.11'
-          - os: macos-latest
+          - os: macos-13           # Intel Mac runner（原生构建 x86_64）
             py: '3.11'
           - os: ubuntu-latest
             py: '3.11'
@@ -36,34 +36,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      # macOS: 在 arm64 runner 上交叉编译 x86_64，再合并为 universal2（Intel + Apple Silicon 通用）
-      - name: Build universal2 (macOS)
-        if: matrix.os == 'macos-latest'
-        shell: bash
+      - name: Build with PyInstaller
+        run: python build.py
+
+      - name: Sign + rename (macOS)
+        if: matrix.os == 'macos-13'
         run: |
-          X86_PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
-          if [ ! -x "$X86_PY" ]; then
-            # 安装 universal2 版 Python（可经 Rosetta 以 x86_64 运行）
-            curl -sLO https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg
-            sudo installer -pkg python-3.11.9-macos11.pkg -target /
-          fi
-          # 用 x86_64 解释器 + 强制 x86_64 轮子，避免拉到 arm64 包导致 PyInstaller 报架构不兼容
-          arch -x86_64 "$X86_PY" -m pip install -U pip
-          arch -x86_64 "$X86_PY" -m pip install --platform macosx_10_9_x86_64 --only-binary=:all: -r requirements.txt pyinstaller
-
-          # 1) 构建 x86_64
-          arch -x86_64 "$X86_PY" build.py
-          mv dist/KnightModder dist/KnightModder-x86_64
-          rm -rf build dist
-
-          # 2) 构建 arm64（原生）
-          python build.py
-          mv dist/KnightModder dist/KnightModder-arm64
-
-          # 3) 合并为 universal2 + 签名
-          lipo -create dist/KnightModder-arm64 dist/KnightModder-x86_64 -output dist/KnightModder-macos
-          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder-macos
-          file dist/KnightModder-macos
+          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder
+          mv dist/KnightModder dist/KnightModder-macos
 
       - name: Rename (Linux)
         if: matrix.os == 'ubuntu-latest'
