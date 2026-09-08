@@ -46,7 +46,8 @@ jobs:
           sudo installer -pkg python-3.11.9-macos11.pkg -target /
           X86_PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
           arch -x86_64 "$X86_PY" -m pip install -U pip
-          arch -x86_64 "$X86_PY" -m pip install -r requirements.txt pyinstaller
+          # 强制拉 x86_64 轮子，否则 arm64 机器上 pip 默认装 arm64 包，PyInstaller 会报架构不兼容
+          arch -x86_64 "$X86_PY" -m pip install --platform macosx_10_9_x86_64 --only-binary=:all: -r requirements.txt pyinstaller
 
           # 2) 构建 x86_64
           arch -x86_64 "$X86_PY" build.py
