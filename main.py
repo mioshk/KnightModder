@@ -29,7 +29,11 @@ sys.excepthook = exception_hook
 # ---------- 线程异常捕获（线程崩溃不会触发 sys.excepthook） ----------
 def thread_exception_hook(args):
     """捕获工作线程中的未处理异常，写入崩溃日志"""
-    exc_type, exc_value, exc_tb = args.exc_type, args.exc_value, args.exc_tb
+    # Python 3.10+ 线程异常钩子参数是 _thread._ExceptHookArgs，
+    # 回溯字段名为 exc_traceback（不是 exc_tb），统一用 getattr 兼容
+    exc_type = args.exc_type
+    exc_value = args.exc_value
+    exc_tb = getattr(args, "exc_traceback", None)
     lines = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
     try:
         with open("crash.log", "w", encoding="utf-8") as f:

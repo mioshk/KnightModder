@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QSizePolicy,
     QTextBrowser,
+    QPlainTextEdit,
 )
 from PySide6.QtGui import QFont, QIcon
 
@@ -539,3 +540,152 @@ class MdLoader(QThread):
             self.finished.emit(True, content.decode("utf-8", errors="replace"))
         except Exception:
             self.finished.emit(False, "")
+
+
+# ============================================================
+# 夸克 Cookie 设置对话框（M3 内嵌登录页完成前的临时方案）
+# ============================================================
+class _QuarkCookieCheckWorker(QThread):
+    """后台线程：请求夸克 account/info 验证 cookie 有效性"""
+    done = Signal(bool, str)
+
+    def __init__(self, cookie, parent=None):
+        super().__init__(parent)
+        self.cookie = cookie
+
+    def run(self):
+        try:
+            from core.online_install import verify_cookie
+            ok, msg = verify_cookie(self.cookie)
+            self.done.emit(ok, msg)
+        except Exception as e:
+            self.done.emit(False, f"验证失败：{e}")
+
+
+def show_quark_cookie_dialog(parent=None):
+    """
+    夸克 Cookie 粘贴 + 验证 + 保存对话框。
+    验证通过网络实时请求 account/info（后台线程，不卡界面）。
+    :return: True=已保存有效 Cookie，False=未保存/取消
+    """
+    from utils.common import load_quark_cookie, save_quark_cookie
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("夸克账号设置")
+    dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+    dialog.setFixedWidth(560)
+    dialog.setStyleSheet("background-color: #1e1e1e;")
+
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(22, 20, 22, 18)
+    layout.setSpacing(12)
+
+    title = QLabel("🔑 夸克网盘登录")
+    title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+    title.setStyleSheet("color: #ffffff; background: transparent;")
+    layout.addWidget(title)
+
+    tip = QLabel(
+        "把夸克网盘的 Cookie 粘贴到下面即可自动登录下载。\n"
+        "获取方法：浏览器登录 pan.quark.cn → F12 → Network → 过滤 quark.cn → 点任意接口 →\n"
+        "请求标头里复制 Cookie 整行（很长，需包含 __pus 与 __puus）。"
+    )
+    tip.setFont(QFont("Microsoft YaHei", 10))
+    tip.setStyleSheet(f"color: {COLOR_TEXT_TERTIARY}; background: transparent;")
+    tip.setWordWrap(True)
+    layout.addWidget(tip)
+
+    text = QPlainTextEdit()
+    text.setPlaceholderText("在此粘贴夸克 Cookie...")
+    text.setFixedHeight(130)
+    text.setFont(QFont("Consolas", 10))
+    text.setStyleSheet(f"""
+        QPlainTextEdit {{
+            background-color: {COLOR_INPUT_BG};
+            color: #e0e0e0;
+            border: 1px solid {COLOR_BORDER};
+            border-radius: 8px;
+            padding: 8px;
+        }}
+        QPlainTextEdit:focus {{
+            border: 1px solid #34c759;
+        }}
+    """)
+    text.setPlainText(load_quark_cookie())
+    layout.addWidget(text)
+
+    state_label = QLabel("")
+    state_label.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+    state_label.setWordWrap(True)
+    layout.addWidget(state_label)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(10)
+
+    test_btn = QPushButton("✅ 验证并保存")
+    test_btn.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+    test_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #34c759;
+            color: white;
+            border: none;
+            border-radius: 16px;
+            padding: 8px 20px;
+        }
+        QPushButton:hover { background-color: #28a745; }
+        QPushButton:disabled { background-color: #444444; color: #888888; }
+    """)
+    close_btn = QPushButton("取消")
+    close_btn.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+    close_btn.setStyleSheet("""
+        QPushButton {
+            background-color: #333333;
+            color: #cccccc;
+            border: 1px solid #555555;
+            border-radius: 16px;
+            padding: 8px 20px;
+        }
+        QPushButton:hover { background-color: #444444; }
+    """)
+    btn_row.addStretch()
+    btn_row.addWidget(test_btn)
+    btn_row.addWidget(close_btn)
+    layout.addLayout(btn_row)
+
+    saved = {"ok": False}
+    _worker_ref = {}
+
+    def _set_state(text_, color):
+        state_label.setText(text_)
+        state_label.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _on_done(ok, msg):
+        _set_state(f"✅ 验证通过：{msg}" if ok else f"❌ {msg}", "#66bb6a" if ok else "#ff6b6b")
+        test_btn.setEnabled(True)
+        test_btn.setText("✅ 已保存，完成" if ok else "✅ 重新验证并保存")
+        if ok:
+            saved["ok"] = True
+            test_btn.clicked.disconnect()
+            test_btn.clicked.connect(dialog.accept)
+
+    def _on_test():
+        cookie = text.toPlainText().strip()
+        if not cookie:
+            _set_state("⚠️ 请先粘贴 Cookie", "#ff9800")
+            return
+        _set_state("⏳ 正在联网验证，请稍候...", "#888888")
+        test_btn.setEnabled(False)
+        worker = _QuarkCookieCheckWorker(cookie, dialog)
+        _worker_ref["w"] = worker
+        worker.done.connect(_on_done)
+        worker.start()
+
+    test_btn.clicked.connect(_on_test)
+    close_btn.clicked.connect(dialog.reject)
+
+    dialog.exec()
+
+    # 验证通过时在此统一保存（避免重复写文件）
+    if saved["ok"]:
+        save_quark_cookie(text.toPlainText().strip())
+    return saved["ok"]

@@ -50,6 +50,7 @@ from ui.dialogs import (
     AboutMarkdownDialog,
 )
 from ui.mod_page import ModPage, OnlineModPage
+from ui.settings_page import SettingsPage
 from utils import (
     load_saved_path,
     save_path,
@@ -60,7 +61,6 @@ from utils import (
     is_unity_mutex_held,
     is_steam_official_path,
     get_save_folder,
-    get_api_zip_path,
     find_hollow_knight_exe,
 )
 from core import (
@@ -70,6 +70,7 @@ from core import (
     install_mods,
     launch_game,
 )
+from core.quark import QuarkError
 
 
 # ============================================================
@@ -193,7 +194,6 @@ class RoundedButton(QPushButton):
                     font-size: 16px;
                     font-weight: 700;
                     padding: 14px 32px;
-                    letter-spacing: 0.5px;
                 }
             """)
         else:
@@ -209,7 +209,6 @@ class RoundedButton(QPushButton):
                     font-size: 16px;
                     font-weight: 700;
                     padding: 14px 32px;
-                    letter-spacing: 0.5px;
                 }
             """)
 
@@ -313,6 +312,7 @@ class MainWindow(QMainWindow):
     dependency_done = Signal(bool)
     install_finished = Signal(bool)
     reload_finished = Signal(bool)
+    api_finished = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -347,6 +347,7 @@ class MainWindow(QMainWindow):
         self.dependency_done.connect(self._on_load_finished)
         self.install_finished.connect(self._on_install_finished)
         self.reload_finished.connect(self._on_reload_finished)
+        self.api_finished.connect(self._on_api_finished)
 
         # 全局事件过滤器：拦截本窗口内任意控件的鼠标事件，
         # 保证无边框窗口的边缘拖拽 resize 在整条边框上都能生效。
@@ -538,7 +539,6 @@ class MainWindow(QMainWindow):
             color: #ffffff;
             font-size: 18px;
             font-weight: 600;
-            letter-spacing: 0.5px;
         """)
         layout.addWidget(title)
 
@@ -752,8 +752,10 @@ class MainWindow(QMainWindow):
         self.tab_main_btn = QPushButton("🏠  首页")
         self.tab_local_btn = QPushButton("📂  本地模组")
         self.tab_online_btn = QPushButton("🌐  在线模组")
+        self.tab_settings_btn = QPushButton("⚙️  设置")
 
-        for btn in [self.tab_main_btn, self.tab_local_btn, self.tab_online_btn]:
+        for btn in [self.tab_main_btn, self.tab_local_btn,
+                    self.tab_online_btn, self.tab_settings_btn]:
             btn.setObjectName("tabBtn")
             btn.setCheckable(True)
 
@@ -780,16 +782,19 @@ class MainWindow(QMainWindow):
                     stop:0 #66bb6a, stop:1 #43a047);
             }
         """
-        for btn in [self.tab_main_btn, self.tab_local_btn, self.tab_online_btn]:
+        for btn in [self.tab_main_btn, self.tab_local_btn,
+                    self.tab_online_btn, self.tab_settings_btn]:
             btn.setStyleSheet(tab_style)
 
         self.tab_main_btn.clicked.connect(lambda: self._switch_tab(0))
         self.tab_local_btn.clicked.connect(lambda: self._switch_tab(1))
         self.tab_online_btn.clicked.connect(lambda: self._switch_tab(2))
+        self.tab_settings_btn.clicked.connect(lambda: self._switch_tab(3))
 
         nav_layout.addWidget(self.tab_main_btn)
         nav_layout.addWidget(self.tab_local_btn)
         nav_layout.addWidget(self.tab_online_btn)
+        nav_layout.addWidget(self.tab_settings_btn)
         nav_layout.addStretch()
 
         return nav_bar
@@ -811,22 +816,31 @@ class MainWindow(QMainWindow):
         self.page_online.setVisible(False)
         self.stack_layout.addWidget(self.page_online)
 
+        self.page_settings = SettingsPage(self)
+        self.page_settings.setVisible(False)
+        self.stack_layout.addWidget(self.page_settings)
+
         return self.stack
 
     def _switch_tab(self, index):
         self.tab_main_btn.setChecked(index == 0)
         self.tab_local_btn.setChecked(index == 1)
         self.tab_online_btn.setChecked(index == 2)
+        self.tab_settings_btn.setChecked(index == 3)
 
         self.page_main.setVisible(index == 0)
         self.page_local.setVisible(index == 1)
         self.page_online.setVisible(index == 2)
+        self.page_settings.setVisible(index == 3)
 
         # 仅首次进入时渲染，之后直接复用已渲染列表（数据变更会主动刷新，如安装/删除/在线数据到达）
         if index == 1 and not getattr(self.page_local, "_rendered", False):
             QTimer.singleShot(50, lambda: self.page_local.refresh_mod_list(self.game_path))
         if index == 2 and not getattr(self.page_online, "_rendered", False):
             QTimer.singleShot(50, lambda: self.page_online.refresh_mod_list(self.game_path))
+        # 进入设置页时刷新一次夸克登录状态（本地 Cookie + 联网验证）
+        if index == 3:
+            QTimer.singleShot(50, self.page_settings.refresh_login_status)
 
     def _create_main_page(self):
         scroll = QScrollArea()
@@ -1025,7 +1039,7 @@ class MainWindow(QMainWindow):
         buttons = [
             ("⚙️", "安装 API", "为游戏注入 Modding API", self._install_api),
             ("↩️", "还原原版", "移除 API，恢复原版 dll", self._restore),
-            ("📦", "安装 Mod", "从本地选择 zip/dll 安装", self._install_mods),
+            ("📦", "手动安装 Mod", "从本地选择 zip/dll 安装", self._install_mods),
             ("📂", "Mods 文件夹", "打开 Mods 安装目录", self._open_mods),
             ("💾", "存档文件夹", "打开游戏存档所在位置", self._open_save),
             ("🔍", "检查前置依赖", "扫描已装 Mod 缺失的依赖", self._check_missing_dependencies),
@@ -1486,18 +1500,30 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            if not os.path.isfile(get_api_zip_path()):
-                QMessageBox.warning(self, "错误", "API 压缩包不存在")
-                return
-
             game_path = self.path_input.text()
             if game_path.endswith('.exe'):
                 game_path = get_root_from_exe(game_path)
-
-            install_api(game_path, self._log)
-            QMessageBox.information(self, "完成", "API 安装完成")
         except Exception as e:
             QMessageBox.warning(self, "失败", str(e))
+            return
+
+        # 下载/解压可能耗时数秒~数分钟，放到后台线程避免冻结 UI
+        threading.Thread(target=self._api_install_task, args=(game_path,), daemon=True).start()
+
+    def _api_install_task(self, game_path):
+        """后台安装/启用 API（install_api 的 status_callback 用线程安全的 _log 信号）"""
+        try:
+            install_api(game_path, status_callback=self._log)
+            self.api_finished.emit(True, "Modding API 已安装/启用完成")
+        except QuarkError as e:
+            self._log(f"❌ 安装失败：{e}", "error")
+            self.api_finished.emit(
+                False,
+                f"安装失败：{e}\n\n请先在「设置 → 登录夸克账号」中登录有效的夸克账号，"
+                f"或确认分享链接仍有效。")
+        except Exception as e:
+            self._log(f"❌ 安装失败：{e}", "error")
+            self.api_finished.emit(False, f"安装失败：{e}")
 
     def _restore(self):
         if not self._valid_path():
@@ -1507,11 +1533,45 @@ class MainWindow(QMainWindow):
             game_path = self.path_input.text()
             if game_path.endswith('.exe'):
                 game_path = get_root_from_exe(game_path)
-
-            restore_vanilla(game_path, self._log)
-            QMessageBox.information(self, "完成", "已还原原版 dll")
         except Exception as e:
             QMessageBox.warning(self, "失败", str(e))
+            return
+
+        threading.Thread(target=self._api_restore_task, args=(game_path,), daemon=True).start()
+
+    def _api_restore_task(self, game_path):
+        """后台还原原版（对齐 Lumafly：缺原版备份时提示用 Steam 验证游戏完整性）"""
+        try:
+            result = restore_vanilla(game_path, status_callback=self._log)
+            if result.get("ok"):
+                if result.get("already_vanilla"):
+                    self.api_finished.emit(True, "当前已是原版游戏，无需还原")
+                else:
+                    self.api_finished.emit(True, "已还原为原版游戏（Modding API 已关闭）")
+                return
+            if result.get("reason") == "no_vanilla_backup":
+                self.api_finished.emit(
+                    False,
+                    "未找到原版 dll 备份（Assembly-CSharp.dll.v）。\n\n"
+                    "请通过 Steam 右键《空洞骑士》→「属性」→「已安装文件」→"
+                    "「验证游戏文件的完整性」，Steam 会自动恢复官方原版文件。")
+                return
+            self.api_finished.emit(False, "还原失败：未知原因")
+        except Exception as e:
+            self._log(f"❌ 还原失败：{e}", "error")
+            self.api_finished.emit(False, f"还原失败：{e}")
+
+    def _on_api_finished(self, success, msg):
+        """安装/还原完成（主线程）：弹窗反馈"""
+        try:
+            if not self.isVisible():
+                return
+        except RuntimeError:
+            return
+        if success:
+            QMessageBox.information(self, "完成", msg)
+        else:
+            QMessageBox.warning(self, "失败", msg)
 
     def _install_mods(self):
         if not self._valid_path():
@@ -1629,7 +1689,8 @@ class MainWindow(QMainWindow):
             if not self.isVisible():
                 return
             if success:
-                # 无论在线页当前是否可见都先渲染好，保证用户点进去秒开
+                # 在线页不可见时 refresh 会自行跳过昂贵构建（仅标记待渲染），
+                # 切到在线页时再按可见区域懒构建，避免在数据到达瞬间卡住首页
                 self.page_online.refresh_mod_list(self.game_path)
             else:
                 QMessageBox.warning(self, "错误", "Mod链接加载失败，请检查网络连接后点击「更新链接」重试")

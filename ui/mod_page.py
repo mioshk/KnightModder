@@ -2,10 +2,24 @@
 """模组管理页面"""
 import os
 import re
+import time
 import webbrowser
 from typing import Callable, Optional
-from PySide6.QtCore import Qt, QTimer, QSignalBlocker, QSize, QEvent
+from PySide6.QtCore import (
+    Qt,
+    QTimer,
+    QSignalBlocker,
+    QSize,
+    QEvent,
+    QThread,
+    Signal,
+    QItemSelection,
+    QItemSelectionModel,
+    QPoint,
+    QPointF,
+)
 from PySide6.QtWidgets import (
+    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -17,7 +31,6 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QScrollArea,
     QMessageBox,
-    QApplication,
     QSizePolicy,
     QLineEdit,
     QComboBox,
@@ -25,8 +38,9 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QCheckBox,
     QToolButton,
+    QProgressBar,
 )
-from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QPaintEvent
+from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QPaintEvent, QMouseEvent, QCursor, QTextCursor
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
 
@@ -37,13 +51,29 @@ def get_modlog_path():
     return os.path.join(user_profile, 'AppData', 'LocalLow', 'Team Cherry', 'Hollow Knight', 'ModLog.txt')
 
 
-def parse_modlog():
-    if not os.path.isfile(get_modlog_path()):
+# ModLog 解析结果缓存（按文件 mtime+size 失效）：
+# 单次点击/刷新都会调用，避免重复读盘（列表大时影响明显）
+_modlog_cache = {"key": None, "data": {}}
+
+
+def parse_modlog(_path=None):
+    path = _path or get_modlog_path()
+    if not os.path.isfile(path):
+        _modlog_cache["key"] = None
+        _modlog_cache["data"] = {}
         return {}
+
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _modlog_cache["key"] == key:
+        return dict(_modlog_cache["data"])
 
     result = {}
     try:
-        with open(get_modlog_path(), 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line.startswith('[INFO]:[API] -'):
@@ -60,7 +90,9 @@ def parse_modlog():
     except Exception:
         pass
 
-    return result
+    _modlog_cache["key"] = key
+    _modlog_cache["data"] = result
+    return dict(result)
 
 
 def normalize_name(name):
@@ -114,7 +146,6 @@ def _make_section_header(icon, title):
             background: transparent;
             border: none;
             padding: 0px;
-            letter-spacing: 1px;
         }
     """)
     return lbl
@@ -166,7 +197,6 @@ class StatusBadge(QLabel):
                 border-radius: 10px;
                 padding: 3px 14px;
                 font-size: 12px;
-                letter-spacing: 0.5px;
             }}
         """)
         self.setFixedHeight(22)
@@ -326,6 +356,10 @@ class ModListItemWidget(QWidget):
         """)
 
     def set_selected(self, selected):
+        # 状态未变直接返回：拖拽/高频刷新会逐行调用，
+        # 无条件重设 QSS 会触发整表样式重算，是明显的卡顿来源
+        if getattr(self, "is_selected", None) == selected:
+            return
         self.is_selected = selected
         self._update_bg_style()
 
@@ -526,9 +560,136 @@ class OnlineModListItemWidget(QWidget):
         self._update_status_dot()
         self._update_action_btn()
 
+    def set_downloading(self, pct=None):
+        """下载中状态：按钮转成进度显示并禁用，避免重复触发"""
+        if pct is None:
+            self.action_btn.setText("下载中…")
+        else:
+            self.action_btn.setText(f"{pct}%")
+        self.action_btn.setCursor(Qt.BusyCursor)
+        self.action_btn.setEnabled(False)
+        self.action_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1a5276;
+                color: #85d3ff;
+                border: none;
+                border-radius: 14px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px;
+            }
+        """)
+
+    def set_installing(self):
+        """安装中状态：下载完成后校验/解压期间展示，禁用按钮避免误触"""
+        self.action_btn.setText("安装中…")
+        self.action_btn.setCursor(Qt.BusyCursor)
+        self.action_btn.setEnabled(False)
+        self.action_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4a3f14;
+                color: #ffd166;
+                border: none;
+                border-radius: 14px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px;
+            }
+        """)
+
+    def set_done(self, status):
+        """完成态：恢复按钮可用，并简短展示结果（已安装 / 已最新 / 失败）"""
+        self.action_btn.setCursor(Qt.PointingHandCursor)
+        self.action_btn.setEnabled(True)
+        if status in ("installed", "updated"):
+            text, bg, fg = "✓ 已安装", "#1e5631", "#7CFC9B"
+        elif status == "skipped":
+            text, bg, fg = "已最新", "#333333", "#bbbbbb"
+        else:
+            text, bg, fg = "✘ 失败", "#5b1f1f", "#ff9b9b"
+        self.action_btn.setText(text)
+        self.action_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {bg};
+                color: {fg};
+                border: none;
+                border-radius: 14px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px;
+            }}
+        """)
+
     def set_selected(self, selected):
+        # 同上：状态未变化时跳过样式重算
+        if getattr(self, "is_selected", None) == selected:
+            return
         self.is_selected = selected
         self._update_bg_style()
+
+
+# ============================================================
+# 在线 Mod 下载线程（夸克下载 + 智能安装）
+# ============================================================
+class OnlineDownloadWorker(QThread):
+    """后台线程：下载阶段把任务闭包（前置们 + 目标本体）并发下载，安装阶段串行。
+
+    并行支持：每个目标 Mod 一个 Worker / 一批（batch_id）；批内 zip 由
+    core.online_install 的线程池并发下载（共享依赖全局只下一次），
+    事件按「任务名」精确对应到弹窗各自的行。
+    """
+    log = Signal(str, str)
+    task_started = Signal(str, str)             # (batch_id, Mod 名) 该任务下载开始/入队
+    progress = Signal(str, str, int)            # (batch_id, Mod 名, 下载百分比)
+    installing = Signal(str, str)               # (batch_id, Mod 名) 进入校验/安装阶段
+    task_done = Signal(str, str, str)           # (batch_id, Mod 名, installed/updated/skipped)
+    stage = Signal(str)                         # 夸克实时阶段消息（解析/转存/取地址…）
+    finished = Signal(str, bool, str, str)      # (batch_id, 是否成功, 目标 Mod 名, 摘要/错误)
+
+    def __init__(self, game_path, batch_id, target_name, tasks, parallel=None, parent=None):
+        super().__init__(parent)
+        self.game_path = game_path
+        self.batch_id = batch_id
+        self.target_name = target_name
+        self.tasks = tasks
+        self.parallel = parallel         # 同批同时下载的路数（设置里可调，None 用默认）
+        self._last_emit = 0.0          # 上次真正发出进度信号的时间（节流）
+        self._emit_interval = 0.08     # 最小发信号间隔（秒），避免高频刷爆 UI 事件队列
+
+    def run(self):
+        try:
+            from core.online_install import run_install_batch
+            res = run_install_batch(
+                self.game_path, self.tasks,
+                log=lambda m, l: self.log.emit(m, l),
+                task_progress=lambda name, done, total: self._emit_pct(name, done, total),
+                on_task_started=lambda name: self.task_started.emit(self.batch_id, name),
+                on_installing=lambda name: self.installing.emit(self.batch_id, name),
+                task_done=lambda name, status: self.task_done.emit(self.batch_id, name, status),
+                on_status=lambda msg: self.stage.emit(msg),
+                parallel=self.parallel,
+            )
+            statuses = res.get("statuses", {})
+            labels = {"installed": "全新安装", "updated": "已更新", "skipped": "已是最新跳过"}
+            detail = "、".join(f"{n}（{labels.get(st, st)}）" for n, st in statuses.items())
+            self.log.emit(f"✅ 全部完成：{detail or '无任务'}", "success")
+            # 弹窗/悬浮面板只报整体结果，不逐个点名；细节留在日志里看
+            self.finished.emit(self.batch_id, True, self.target_name, "")
+        except Exception as e:
+            self.log.emit(f"❌ 下载安装中止：{e}", "error")
+            self.finished.emit(self.batch_id, False, self.target_name, str(e))
+
+    def _emit_pct(self, task_name, done, total):
+        if not total:
+            return
+        pct = max(0, min(100, int(done * 100 / total)))
+        now = time.monotonic()
+        # 节流：下载线程每收一小块就回调一次，若全量转发会以每秒上百次的速度
+        # 刷爆 UI 事件队列，导致界面（含进度条）一卡一跳。限频后仅 100% 强制补发。
+        if pct != 100 and (now - self._last_emit) < self._emit_interval:
+            return
+        self._last_emit = now
+        self.progress.emit(self.batch_id, task_name, pct)
 
 
 # ============================================================
@@ -570,7 +731,6 @@ class ModDetailPanel(QWidget):
                 background: transparent;
                 border: none;
                 padding: 0px;
-                letter-spacing: 0.5px;
             }
         """)
         self.title_en.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -741,7 +901,6 @@ class ModDetailPanel(QWidget):
                 background: transparent;
                 border: none;
                 padding: 0px;
-                letter-spacing: 0.5px;
             }
         """)
         self.title_en.setText(f"{mod_name}（{chinese_name}）" if chinese_name else mod_name)
@@ -1017,6 +1176,21 @@ class ModPage(QWidget):
         self._current_widget = None
         self._current_row = -1
         self._rendered = False  # 首次渲染标记：切换标签页时避免重复重建列表
+        # 自定义拖拽区间选择状态（替代 Qt 自带框选，修复自绘行+自动滚动下漏选/丢尾行）
+        self._sel_press_row = -1          # 按下时所在行（-1 表示未在拖拽选择中）
+        self._sel_press_pos = QPoint()    # 按下位置（viewport 坐标）
+        self._sel_last_row = -1           # 兼容旧字段（当前鼠标所在行）
+        self._sel_click_anchor = -1       # Shift 扩展用的锚点行（上次单击的行）
+        self._sel_anchor_row = -1         # 框选起点行
+        self._sel_anchor_off = 0          # 起点在该行内的 y 偏移（可 <0 或 >行高）
+        self._sel_end_row = -1            # 框选终点行
+        self._sel_end_off = 0             # 终点在该行内的 y 偏移
+        self._sel_dragging = False        # 是否已进入拖拽框选
+        self._sel_pending_blank = False   # 按下点落在间隙/空白：未拖动则视为“点空白取消选中”
+        self._sel_ctrl = False            # 按下瞬间是否按住 Ctrl
+        self._sel_shift = False           # 按下瞬间是否按住 Shift
+        self._sel_base = set()            # 拖拽开始前已选中的行集合（Ctrl 加选时作基线）
+        self._sel_autoscroll = None       # 拖拽到边缘时的自动滚动 QTimer
         self._setup_ui()
 
     def _setup_ui(self):
@@ -1274,80 +1448,6 @@ class ModPage(QWidget):
         self.detail_scroll = ModDetailScrollArea()
         right_layout.addWidget(self.detail_scroll, stretch=1)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
-
-        self.copy_link_btn = QPushButton("📋 复制Mod下载地址")
-        self.copy_link_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34c759;
-                color: white;
-                border: none;
-                border-radius: 16px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #28a745;
-            }
-            QPushButton:disabled {
-                background-color: #444444;
-                color: #888888;
-            }
-        """)
-        self.copy_link_btn.clicked.connect(self._copy_mod_link)
-        self.copy_link_btn.setEnabled(False)
-        btn_layout.addWidget(self.copy_link_btn)
-
-        self.copy_batch_btn = QPushButton("📦 复制Mod本体+前置下载地址")
-        self.copy_batch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007aff;
-                color: white;
-                border: none;
-                border-radius: 16px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #0062cc;
-            }
-            QPushButton:disabled {
-                background-color: #444444;
-                color: #888888;
-            }
-        """)
-        self.copy_batch_btn.clicked.connect(self._copy_batch_links)
-        self.copy_batch_btn.setEnabled(False)
-        btn_layout.addWidget(self.copy_batch_btn)
-
-        btn_layout.addStretch()
-        right_layout.addLayout(btn_layout)
-
-        # ---- 右下角复制提示 ----
-        self._copy_tip_label = QLabel("")
-        self._copy_tip_label.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
-        self._copy_tip_label.setStyleSheet("""
-            QLabel {
-                color: #b5ffc6;
-                background-color: rgba(40, 167, 69, 0.92);
-                border: 1px solid rgba(52, 199, 89, 0.65);
-                border-radius: 8px;
-                padding: 8px 18px;
-            }
-        """)
-        self._copy_tip_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self._copy_tip_label.setVisible(False)
-        self._copy_tip_label.setWordWrap(False)
-        self._copy_tip_label.setParent(right_panel)
-        self._copy_tip_label.raise_()
-
-        self._copy_tip_timer = QTimer(self)
-        self._copy_tip_timer.setSingleShot(True)
-        self._copy_tip_timer.timeout.connect(self._hide_copy_tip)
-
         right_panel.installEventFilter(self)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -1361,40 +1461,297 @@ class ModPage(QWidget):
         content_layout.addWidget(splitter)
         layout.addWidget(content, stretch=1)
 
-    # ---------- 右下角提示相关 ----------
+    # ---------- 鼠标选择：点击 / Shift / Ctrl / 拖拽区间（自实现，替代 Qt marquee） ----------
     def eventFilter(self, obj, event):
-        if hasattr(self, 'detail_scroll') and obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
-            self._reposition_copy_tip()
-            return True
-        if obj == self.mod_list.viewport() and event.type() == QEvent.MouseButtonPress:
-            item = self.mod_list.itemAt(event.pos())
-            if item is None:
-                self._clear_selection()
+        if obj == self.mod_list.viewport():
+            t = event.type()
+            if t == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._on_list_press(event)
+                return True
+            if t == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
+                self._on_list_double_click(event)
+                return True
+            if t == QEvent.MouseMove and (event.buttons() & Qt.LeftButton) and self._sel_press_row >= 0:
+                self._on_list_move(event)
+                return True
+            if t == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton and self._sel_press_row >= 0:
+                self._on_list_release(event)
                 return True
         return super().eventFilter(obj, event)
 
-    def _reposition_copy_tip(self):
-        parent_widget = self._copy_tip_label.parent()
-        if parent_widget:
-            rect = parent_widget.rect()
-            size = self._copy_tip_label.sizeHint()
-            margin = 16
-            self._copy_tip_label.move(
-                rect.width() - size.width() - margin,
-                rect.height() - size.height() - margin
-            )
-            self._copy_tip_label.raise_()
+    def _row_at(self, pos):
+        """viewport 坐标 -> 行号；不在任何行上返回 -1"""
+        item = self.mod_list.itemAt(pos)
+        return self.mod_list.row(item) if item is not None else -1
 
-    def _show_copy_tip(self, text):
-        self._copy_tip_label.setText(text)
-        self._copy_tip_label.adjustSize()
-        self._reposition_copy_tip()
-        self._copy_tip_label.setVisible(True)
-        self._copy_tip_label.raise_()
-        self._copy_tip_timer.start(4000)
+    def _nearest_row(self, pos):
+        """把坐标（可能落在行间隙/边缘外）吸附到最近的可视行"""
+        vp = self.mod_list.viewport()
+        x = pos.x()
+        y = pos.y()
+        if y < 0:
+            y = 0
+        elif y >= vp.height():
+            y = vp.height() - 1
+        row = self._row_at(QPoint(x, y))
+        if row >= 0:
+            return row
+        best, best_d = -1, 10 ** 9
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item is None or item.isHidden():
+                continue
+            rect = self.mod_list.visualItemRect(item)
+            d = 0
+            if y < rect.top():
+                d = rect.top() - y
+            elif y > rect.bottom():
+                d = y - rect.bottom()
+            if d < best_d:
+                best, best_d = i, d
+                if d == 0:
+                    break
+        return best
 
-    def _hide_copy_tip(self):
-        self._copy_tip_label.setVisible(False)
+    def _selected_row_set(self):
+        """当前可见且被选中的行号集合（不含“暂无已安装模组”）"""
+        rows = set()
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item is None or item.isHidden():
+                continue
+            if item.data(Qt.UserRole) in (None, "", "暂无已安装模组"):
+                continue
+            if item.isSelected():
+                rows.add(i)
+        return rows
+
+    def _apply_selection_rows(self, rows):
+        """整段替换当前选择为指定行集合"""
+        if not rows:
+            self.mod_list.clearSelection()
+            return
+        sm = self.mod_list.selectionModel()
+        if sm is None:
+            return
+        model = sm.model()
+        selection = QItemSelection()
+        for r in rows:
+            idx = model.index(r, 0)
+            selection.select(idx, idx)
+        sm.select(selection, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+
+    def _range_visible_rows(self, lo, hi):
+        """区间 [lo, hi] 内的所有可见行号"""
+        result = []
+        for r in range(lo, hi + 1):
+            item = self.mod_list.item(r)
+            if item is None or item.isHidden():
+                continue
+            result.append(r)
+        return result
+
+    def _row_and_offset(self, pos):
+        """坐标 -> (行号, 该行内的 y 偏移)。
+        偏移可能 <0（落在该行上方）或 >行高（落在该行下方/间隙/空白区），
+        矩形框选靠它判断边界行是否真的被框到"""
+        row = self._row_at(pos)
+        if row < 0:
+            row = self._nearest_row(pos)
+            if row < 0:
+                return -1, 0
+        item = self.mod_list.item(row)
+        if item is None:
+            return -1, 0
+        rect = self.mod_list.visualItemRect(item)
+        return row, pos.y() - rect.top()
+
+    def _band_rows(self):
+        """按“矩形相交”计算被框住的行：
+        起点/终点各落在某一行的某个偏移上，只有在矩形纵向范围内的行才选中，
+        因此从空白处、行间隙起笔或收笔都能得到和原生框选一致的结果"""
+        lst = self.mod_list
+        a_row, a_off = self._sel_anchor_row, self._sel_anchor_off
+        b_row, b_off = self._sel_end_row, self._sel_end_off
+        if a_row < 0 or b_row < 0:
+            return []
+        if a_row < b_row or (a_row == b_row and a_off <= b_off):
+            lo, lo_off, hi, hi_off = a_row, a_off, b_row, b_off
+        else:
+            lo, lo_off, hi, hi_off = b_row, b_off, a_row, a_off
+
+        rows = []
+        for r in range(lo, hi + 1):
+            item = lst.item(r)
+            if item is None or item.isHidden():
+                continue
+            rect = lst.visualItemRect(item)
+            h = rect.height() or 58
+            if lo == hi:
+                # 同一行内的拖动：矩形与该行有重叠才选中
+                if max(lo_off, hi_off) < 0 or min(lo_off, hi_off) > h:
+                    continue
+            else:
+                if r == lo and lo_off > h:
+                    continue          # 起点在该行下方（间隙/空白）
+                if r == hi and hi_off < 0:
+                    continue          # 终点在该行上方
+            rows.append(r)
+        return rows
+
+    def _on_list_press(self, event):
+        """左键按下：先落点确定本次点击语义（单击/Shift 区间/Ctrl 反选），
+        并记录矩形起点（行 + 行内偏移），后续位移足够时进入自定义框选"""
+        pos = event.position().toPoint()
+        row, off = self._row_and_offset(pos)
+        self._stop_autoscroll()
+        self._sel_dragging = False
+        self._sel_pending_blank = False
+        self._sel_press_row = row
+        self._sel_press_pos = pos
+        self._sel_anchor_row = row      # 矩形起点（框选用）
+        self._sel_anchor_off = off
+        self._sel_end_row = row
+        self._sel_end_off = off
+        if row < 0:
+            self._clear_selection()
+            return
+        if self._row_at(pos) < 0:
+            # 落在行间隙/空白：先不改动选择，若之后拖动则以该位置为矩形起点；
+            # 松手时若没有拖动，再按“点空白取消选中”处理
+            self._sel_ctrl = False
+            self._sel_shift = False
+            self._sel_base = self._selected_row_set()
+            self._sel_pending_blank = True
+            return
+        mods = event.modifiers()
+        self._sel_ctrl = bool(mods & Qt.ControlModifier)
+        self._sel_shift = bool(mods & Qt.ShiftModifier)
+        self._sel_base = self._selected_row_set()
+        with QSignalBlocker(self.mod_list):
+            if self._sel_ctrl:
+                new_rows = self._sel_base ^ {row}
+            elif self._sel_shift:
+                anchor = self._sel_click_anchor if self._sel_click_anchor >= 0 else row
+                lo, hi = min(anchor, row), max(anchor, row)
+                new_rows = set(self._range_visible_rows(lo, hi))
+            else:
+                new_rows = {row}
+            self._apply_selection_rows(sorted(new_rows))
+        if not self._sel_shift:
+            self._sel_click_anchor = row
+        # 只同步 current（便于键盘上下导航），不要动选择集：
+        # setCurrentRow() 会清空并只选中该行，会把刚算好的多选/加选结果打回单行
+        sm = self.mod_list.selectionModel()
+        if sm is not None:
+            sm.setCurrentIndex(sm.model().index(row, 0), QItemSelectionModel.NoUpdate)
+        # 先做轻量同步（不打开详情），松手或进入框选时再统一刷新详情
+        self._on_selection_changed(update_detail=False)
+
+    def _on_list_move(self, event):
+        """按住左键移动：位移足够后进入自定义矩形框选"""
+        pos = event.position().toPoint()
+        row, off = self._row_and_offset(pos)
+        if not self._sel_dragging:
+            moved = (pos - self._sel_press_pos).manhattanLength()
+            if row == self._sel_press_row and moved < QApplication.startDragDistance():
+                return
+            self._sel_dragging = True
+        if row >= 0:
+            self._sel_end_row = row
+            self._sel_end_off = off
+        self._update_drag_selection()
+        vp = self.mod_list.viewport()
+        h = vp.height()
+        if pos.y() <= 18 or pos.y() >= h - 18:
+            self._ensure_autoscroll()
+        else:
+            self._stop_autoscroll()
+
+    def _update_drag_selection(self):
+        """按当前矩形范围更新选择；
+        无 Ctrl = 替换为矩形内可见行，Ctrl = 在“按下前已选”基线上叠加这些行"""
+        rows = self._band_rows()
+        if self._sel_ctrl:
+            final = set(self._sel_base) | set(rows)
+        else:
+            final = set(rows)
+        with QSignalBlocker(self.mod_list):
+            self._apply_selection_rows(sorted(final))
+        self._on_selection_changed(update_detail=False)
+
+    def _on_list_release(self, event):
+        """松手：若在框选，补一次最终区间计算，再统一刷新详情与按钮状态"""
+        self._stop_autoscroll()
+        if self._sel_dragging:
+            row, off = self._row_and_offset(event.position().toPoint())
+            if row >= 0:
+                self._sel_end_row = row
+                self._sel_end_off = off
+                self._update_drag_selection()
+        elif self._sel_pending_blank:
+            # 只是点了一下空白/间隙：取消选中（保持原有交互）
+            self._clear_selection()
+        self._sel_press_row = -1
+        self._sel_dragging = False
+        self._sel_pending_blank = False
+        self._on_selection_changed(update_detail=True)
+
+    def _on_list_double_click(self, event):
+        """双击：保持原有“双击启用/禁用”交互"""
+        pos = event.position().toPoint()
+        row = self._row_at(pos)
+        self._stop_autoscroll()
+        self._sel_press_row = -1
+        self._sel_dragging = False
+        if row < 0:
+            return
+        item = self.mod_list.item(row)
+        if item is not None:
+            self._on_item_double_clicked(item)
+
+    def _ensure_autoscroll(self):
+        if self._sel_autoscroll is None:
+            timer = QTimer(self.mod_list)
+            timer.setInterval(16)
+            timer.timeout.connect(self._autoscroll_tick)
+            timer.start()
+            self._sel_autoscroll = timer
+
+    def _autoscroll_tick(self):
+        """拖到列表上/下边缘时自动滚动并持续扩展选择"""
+        if self._sel_press_row < 0:
+            self._stop_autoscroll()
+            return
+        vp = self.mod_list.viewport()
+        pos = vp.mapFromGlobal(QCursor.pos())
+        h = vp.height()
+        sb = self.mod_list.verticalScrollBar()
+        step = 22
+        if pos.y() <= 18:
+            new_val = max(sb.minimum(), sb.value() - step)
+        elif pos.y() >= h - 18:
+            new_val = min(sb.maximum(), sb.value() + step)
+        else:
+            self._stop_autoscroll()
+            return
+        if new_val == sb.value():
+            self._stop_autoscroll()
+            return
+        sb.setValue(new_val)
+        row, off = self._row_and_offset(pos)
+        if row >= 0:
+            self._sel_end_row = row
+            self._sel_end_off = off
+            self._update_drag_selection()
+
+    def _stop_autoscroll(self):
+        if self._sel_autoscroll is not None:
+            try:
+                self._sel_autoscroll.stop()
+            except RuntimeError:
+                pass
+            self._sel_autoscroll = None
 
     # ---------- 原有业务逻辑 ----------
     def _on_item_double_clicked(self, item):
@@ -1437,7 +1794,9 @@ class ModPage(QWidget):
             self.mod_list.clearSelection()
             self.select_all_btn.setText("全选")
 
-    def _on_selection_changed(self):
+    def _on_selection_changed(self, update_detail=True):
+        """选择变化同步。拖拽过程中以 update_detail=False 高频轻量调用，
+        避免每次移动都重读 ModLog / 详情；松手后 update_detail=True 一次性刷新详情"""
         selected_items = self.mod_list.selectedItems()
         valid_selected = [
             item for item in selected_items
@@ -1471,22 +1830,18 @@ class ModPage(QWidget):
             self.batch_disable_btn.setEnabled(False)
             self.batch_delete_btn.setEnabled(False)
 
-        if count == 1:
-            item = valid_selected[0]
-            mod_name = item.data(Qt.UserRole)
-            if mod_name and mod_name != "暂无已安装模组":
-                self._current_mod = mod_name
-                self._current_widget = self.mod_list.itemWidget(item)
-                self._show_mod_detail(mod_name)
-        elif count == 0:
-            self._current_mod = None
-            self._current_widget = None
-            self.copy_link_btn.setEnabled(False)
-            self.copy_batch_btn.setEnabled(False)
-            self.detail_scroll.detail_panel._show_empty_state()
-        elif count > 1:
-            self.copy_link_btn.setEnabled(False)
-            self.copy_batch_btn.setEnabled(False)
+        if update_detail:
+            if count == 1:
+                item = valid_selected[0]
+                mod_name = item.data(Qt.UserRole)
+                if mod_name and mod_name != "暂无已安装模组":
+                    self._current_mod = mod_name
+                    self._current_widget = self.mod_list.itemWidget(item)
+                    self._show_mod_detail(mod_name)
+            elif count == 0:
+                self._current_mod = None
+                self._current_widget = None
+                self.detail_scroll.detail_panel._show_empty_state()
 
     def _get_selected_mods(self):
         result = []
@@ -1556,8 +1911,6 @@ class ModPage(QWidget):
             if self._current_mod in mod_names:
                 self._current_mod = None
                 self._current_widget = None
-                self.copy_link_btn.setEnabled(False)
-                self.copy_batch_btn.setEnabled(False)
                 self.detail_scroll.detail_panel._show_empty_state()
 
             self.refresh_mod_list(game_path)
@@ -1574,8 +1927,6 @@ class ModPage(QWidget):
             self._current_mod = None
             self._current_widget = None
             self._current_row = -1
-            self.copy_link_btn.setEnabled(False)
-            self.copy_batch_btn.setEnabled(False)
             self.detail_scroll.detail_panel._show_empty_state()
             self.batch_actions_widget.setVisible(False)
             self.select_all_btn.setText("全选")
@@ -1737,8 +2088,6 @@ class ModPage(QWidget):
             self._current_widget.set_selected(False)
             self._current_widget = None
         self._current_mod = None
-        self.copy_link_btn.setEnabled(False)
-        self.copy_batch_btn.setEnabled(False)
         self.detail_scroll.detail_panel._show_empty_state()
 
     def _on_search_text_changed(self, text):
@@ -1789,38 +2138,8 @@ class ModPage(QWidget):
                 mod_info=mod_info,
             )
 
-            if mod_info:
-                link = mod_info.get('link', '')
-                batch_links = mod_info.get('batch_links', [])
-                self.copy_link_btn.setEnabled(bool(link))
-                self.copy_batch_btn.setEnabled(bool(batch_links))
-            else:
-                self.copy_link_btn.setEnabled(False)
-                self.copy_batch_btn.setEnabled(False)
         except RuntimeError:
             pass
-
-    def _copy_mod_link(self):
-        if not self._current_mod or not self.parent:
-            return
-
-        resolver = self.parent.resolver
-        if hasattr(resolver, 'mod_data_by_name') and self._current_mod in resolver.mod_data_by_name:
-            link = resolver.mod_data_by_name[self._current_mod].get('link', '')
-            if link:
-                QApplication.clipboard().setText(link)
-                self._show_copy_tip("已复制本体地址")
-
-    def _copy_batch_links(self):
-        if not self._current_mod or not self.parent:
-            return
-
-        resolver = self.parent.resolver
-        if hasattr(resolver, 'mod_data_by_name') and self._current_mod in resolver.mod_data_by_name:
-            batch_links = resolver.mod_data_by_name[self._current_mod].get('batch_links', [])
-            if batch_links:
-                QApplication.clipboard().setText("\n".join(batch_links))
-                self._show_copy_tip("已复制本体+前置地址")
 
     def _is_mod_installed(self, mod_name):
         try:
@@ -1860,7 +2179,18 @@ class OnlineModPage(QWidget):
         self._current_widget = None
         self._current_row = -1
         self._rendered = False  # 首次渲染标记：切换标签页时避免重复重建列表
+        self._game_path = ""
+        self._batch_seq = 0         # 下载批次自增 id（多任务并行，每批一个 Worker）
+        self._workers = []          # 持有 QThread 引用，防止被 GC
+        self._batch_results = {}    # batch_id -> (目标Mod名, 是否成功, 结果摘要)，全部结束后汇总提示
+        self._active_batch_targets = set()  # 正在下载/安装中的目标 Mod 名（防重复开批）
+        # 行 widget 懒构建：只给“可见 + 少量缓冲”的行创建 widget，
+        # 其余行先以轻量 item 占位，随滚动/筛选动态补齐（显著降低启动/整体卡顿）
+        self._row_transient = {}    # mod_name -> ('downloading', pct) / ('installing',) / ('done', status)
+        self._prog = {}             # (batch_id, name) -> 该任务整体进度 0..1
+        self._prog_active = set()   # 仍在进行（未完成）的任务键集合
         self._setup_ui()
+        self._refresh_quark_status()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1880,23 +2210,7 @@ class OnlineModPage(QWidget):
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         title.setStyleSheet("color: #ffffff; background: transparent;")
 
-        hint_label = QLabel("⚠ 已安装模组状态依赖 ModLog 检测版本，启动游戏后才能正确检测已安装版本信息！")
-        hint_label.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
-        hint_label.setStyleSheet("""
-            QLabel {
-                color: #ff9500;
-                background-color: rgba(255, 149, 0, 0.12);
-                border: 1px solid rgba(255, 149, 0, 0.4);
-                border-radius: 10px;
-                padding: 4px 12px;
-                margin-left: 16px;
-            }
-        """)
-        hint_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        hint_label.setWordWrap(False)
-
         nav_layout.addWidget(title)
-        nav_layout.addWidget(hint_label)
         nav_layout.addStretch()
 
         self.search_input = QLineEdit()
@@ -1980,6 +2294,13 @@ class OnlineModPage(QWidget):
         """)
         self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.filter_combo)
+
+        # 夸克账号状态显示（登录/切换入口在顶部「设置」页）
+        self.quark_chip = QLabel("夸克：未配置")
+        self.quark_chip.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self.quark_chip.setToolTip("夸克网盘账号状态。登录 / 切换 / 退出请在顶部「设置」页操作。")
+        self.quark_chip.setStyleSheet("color: #ff6b6b; background: transparent; padding-left: 12px;")
+        filter_layout.addWidget(self.quark_chip)
         filter_layout.addStretch()
 
         self.count_label = QLabel("共 0 个模组")
@@ -2031,7 +2352,31 @@ class OnlineModPage(QWidget):
         """)
         self.mod_list.itemClicked.connect(self._on_item_clicked)
         self.mod_list.viewport().installEventFilter(self)
-        left_layout.addWidget(self.mod_list)
+        # 滚动时按需为进入视野的行创建自绘 widget（懒构建，避免整表一次性建 600+ widget）
+        self.mod_list.verticalScrollBar().valueChanged.connect(self._on_list_scrolled)
+        left_layout.addWidget(self.mod_list, stretch=3)
+
+        # ---- 下方：整体进度（汇总所有并行下载 + 安装的总进度，替代原日志区） ----
+        self._prog_card = QFrame()
+        self._prog_card.setStyleSheet("QFrame{background:#191919;border:none;border-radius:10px;}")
+        prog_layout = QVBoxLayout(self._prog_card)
+        prog_layout.setContentsMargins(14, 12, 14, 12)
+        prog_layout.setSpacing(8)
+        self._prog_label = QLabel("整体进度 0%")
+        self._prog_label.setStyleSheet("color:#d5d5d5;font-size:12px;font-weight:600;")
+        prog_layout.addWidget(self._prog_label)
+        self._prog_bar = QProgressBar()
+        self._prog_bar.setRange(0, 100)
+        self._prog_bar.setValue(0)
+        self._prog_bar.setTextVisible(True)
+        self._prog_bar.setFormat("%p%")
+        self._prog_bar.setStyleSheet(
+            "QProgressBar{background:#2a2a2a;border:none;border-radius:7px;"
+            "height:14px;text-align:center;color:#ffffff;font-size:11px;font-weight:700;}"
+            "QProgressBar::chunk{background:#34c759;border-radius:7px;}")
+        prog_layout.addWidget(self._prog_bar)
+        self._prog_card.setVisible(False)   # 空闲（无进行中任务）时隐藏
+        left_layout.addWidget(self._prog_card, stretch=0)
 
         right_panel = QWidget()
         right_panel.setStyleSheet("""
@@ -2046,59 +2391,7 @@ class OnlineModPage(QWidget):
         self.detail_scroll = ModDetailScrollArea()
         right_layout.addWidget(self.detail_scroll, stretch=1)
 
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
-
-        self.copy_link_btn = QPushButton("📋 复制Mod下载地址")
-        self.copy_link_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34c759;
-                color: white;
-                border: none;
-                border-radius: 16px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #28a745;
-            }
-            QPushButton:disabled {
-                background-color: #444444;
-                color: #888888;
-            }
-        """)
-        self.copy_link_btn.clicked.connect(self._copy_mod_link)
-        self.copy_link_btn.setEnabled(False)
-        btn_layout.addWidget(self.copy_link_btn)
-
-        self.copy_batch_btn = QPushButton("📦 复制Mod本体+前置下载地址")
-        self.copy_batch_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #007aff;
-                color: white;
-                border: none;
-                border-radius: 16px;
-                padding: 8px 18px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #0062cc;
-            }
-            QPushButton:disabled {
-                background-color: #444444;
-                color: #888888;
-            }
-        """)
-        self.copy_batch_btn.clicked.connect(self._copy_batch_links)
-        self.copy_batch_btn.setEnabled(False)
-        btn_layout.addWidget(self.copy_batch_btn)
-
-        btn_layout.addStretch()
-        right_layout.addLayout(btn_layout)
-
-        # ---- 右下角复制提示 ----
+        # ---- 右下角悬浮提示（夸克登录 / 下载安装结果） ----
         self._copy_tip_label = QLabel("")
         self._copy_tip_label.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
         self._copy_tip_label.setStyleSheet("""
@@ -2133,7 +2426,7 @@ class OnlineModPage(QWidget):
         content_layout.addWidget(splitter)
         layout.addWidget(content, stretch=1)
 
-    # ---------- 右下角提示相关 ----------
+    # ---------- 右下角悬浮提示相关 ----------
     def eventFilter(self, obj, event):
         if hasattr(self, 'detail_scroll') and obj == self.detail_scroll.parent() and event.type() == event.Type.Resize:
             self._reposition_copy_tip()
@@ -2171,16 +2464,22 @@ class OnlineModPage(QWidget):
     # ---------- 原有业务逻辑 ----------
     def refresh_mod_list(self, game_path):
         try:
+            self._game_path = game_path or ""
+            if not self.isVisible():
+                # 页面不可见（后台数据刷新 / 下载批量完成时用户正停在其它页）：
+                # 跳过昂贵的整表构建，仅标记“未渲染”，切回本页时再真正渲染，
+                # 避免在用户操作其它页面时被卡顿
+                self._rendered = False
+                return
             selected_mod = self._current_mod
             saved_filter_index = self.filter_combo.currentIndex()
             saved_search_text = self.search_input.text()
 
             self.mod_list.clear()
+            self._row_transient.clear()
             self._current_mod = None
             self._current_widget = None
             self._current_row = -1
-            self.copy_link_btn.setEnabled(False)
-            self.copy_batch_btn.setEnabled(False)
             self.detail_scroll.detail_panel._show_empty_state()
 
             if not self.parent or not hasattr(self.parent, 'resolver'):
@@ -2216,7 +2515,8 @@ class OnlineModPage(QWidget):
                 self._filter_mods()
                 return
 
-            local_mods = parse_modlog()
+            from core.online_install import installed_mod_set, local_package_sha
+            installed = installed_mod_set(self._game_path) if self._game_path else set()
             found_mods = []
 
             for mod_info in mod_data:
@@ -2225,17 +2525,23 @@ class OnlineModPage(QWidget):
                     continue
 
                 chinese_name = mod_info.get('chinese_name', '')
-                online_version = mod_info.get('version', '')
+                online_sha = (mod_info.get('sha256') or '').strip().upper()
                 normalized_online = normalize_name(mod_name)
-                local_info = local_mods.get(normalized_online)
-                is_installed = local_info is not None
+
+                # 「已安装」只看游戏 Mods / Disabled 目录里是否真实存在该 Mod。
+                # 「待更新」仅按线上包 sha 与本地安装记录比对；无 sha 时不参考 ModLog，
+                # 直接视为已是最新（保持“已安装”）。
+                in_folder = normalized_online in installed
+                is_installed = in_folder
                 has_update = False
 
-                if local_info is not None and online_version:
-                    if normalize_version(online_version) != normalize_version(local_info[1]):
-                        has_update = True
+                if is_installed and online_sha:
+                    # 有远程 sha：本地安装包校验值与线上不一致 => 待更新
+                    has_update = local_package_sha(self._game_path, mod_name) != online_sha
 
                 found_mods.append((mod_name, chinese_name, is_installed, has_update))
+
+            self._refresh_quark_status()
 
             if not found_mods:
                 self.mod_list.addItem("暂无在线模组")
@@ -2250,7 +2556,9 @@ class OnlineModPage(QWidget):
 
             found_mods.sort(key=lambda x: x[0].lower())
 
-            # 批量插入期间禁用重绘/重排，结束后一次性布局（大幅提速）
+            # 第一遍只插入“轻量 item 外壳”（不含自绘 widget，非常快）。
+            # 行 widget 交给 _ensure_visible_row_widgets 按需懒构建，
+            # 避免一次性创建 600+ 个 widget（约 1.9s 的主线程卡顿）。
             self.mod_list.setUpdatesEnabled(False)
             for mod_name, chinese_name, is_installed, has_update in found_mods:
                 display_name = f"{mod_name}（{chinese_name}）" if chinese_name else mod_name
@@ -2259,22 +2567,10 @@ class OnlineModPage(QWidget):
                 item.setData(Qt.UserRole, mod_name)
                 item.setData(Qt.UserRole + 1, is_installed)
                 item.setData(Qt.UserRole + 2, has_update)
-
-                widget = OnlineModListItemWidget(
-                    mod_name=mod_name,
-                    display_name=display_name,
-                    is_installed=is_installed,
-                    has_update=has_update,
-                    parent=self.mod_list,
-                    list_item=item
-                )
-                item.setSizeHint(widget.sizeHint())
+                item.setData(Qt.UserRole + 3, chinese_name or "")
+                item.setData(Qt.UserRole + 4, display_name)
+                item.setSizeHint(QSize(0, 58))
                 self.mod_list.addItem(item)
-                self.mod_list.setItemWidget(item, widget)
-
-                widget.action_btn.clicked.connect(
-                    lambda checked=False, mn=mod_name, w=widget: self._on_action_clicked(mn, w)
-                )
 
             self._update_count()
             self.search_input.setText(saved_search_text)
@@ -2282,6 +2578,7 @@ class OnlineModPage(QWidget):
                 self.filter_combo.setCurrentIndex(saved_filter_index)
             # 恢复 UI 更新，一次性完成重排
             self.mod_list.setUpdatesEnabled(True)
+            self.mod_list.viewport().update()
 
             if selected_mod:
                 for i in range(self.mod_list.count()):
@@ -2300,6 +2597,11 @@ class OnlineModPage(QWidget):
                 self.detail_scroll.detail_panel.status_label.setStyleSheet(
                     "color: #666666; background: transparent; border: none;")
 
+            # 页面可见：只给当前视野内的行建 widget，其余延后。
+            # 布局尚未完成时 visualItemRect 可能无效，故延迟一帧再补一次
+            self._ensure_visible_row_widgets()
+            QTimer.singleShot(0, self._ensure_visible_row_widgets)
+
             self._rendered = True
         except Exception:
             pass
@@ -2308,26 +2610,126 @@ class OnlineModPage(QWidget):
         self.count_label.setText(f"共 {self.mod_list.count()} 个模组")
 
     def _filter_mods(self):
+        # 筛选基于 item 数据角色完成，不依赖行 widget 是否已懒构建
         search_text = self.search_input.text().lower()
         filter_index = self.filter_combo.currentIndex()
 
         for i in range(self.mod_list.count()):
             item = self.mod_list.item(i)
-            widget = self.mod_list.itemWidget(item)
-            if widget:
-                visible = True
-                if search_text and search_text not in widget.display_name.lower() and search_text not in widget.mod_name.lower():
-                    visible = False
-                if filter_index == 1 and not widget.is_installed:
-                    visible = False
-                elif filter_index == 2 and not widget.has_update:
-                    visible = False
-                elif filter_index == 3 and widget.is_installed:
-                    visible = False
-                item.setHidden(not visible)
+            mod_name = item.data(Qt.UserRole) or ""
+            if not mod_name or mod_name.startswith(("暂无", "⏳")):
+                item.setHidden(False)
+                continue
+            chinese_name = item.data(Qt.UserRole + 3) or ""
+            is_installed = bool(item.data(Qt.UserRole + 1))
+            has_update = bool(item.data(Qt.UserRole + 2))
+
+            visible = True
+            if search_text and search_text not in mod_name.lower() and search_text not in chinese_name.lower():
+                visible = False
+            if filter_index == 1 and not is_installed:
+                visible = False
+            elif filter_index == 2 and not has_update:
+                visible = False
+            elif filter_index == 3 and is_installed:
+                visible = False
+            item.setHidden(not visible)
 
         visible_count = sum(1 for i in range(self.mod_list.count()) if not self.mod_list.item(i).isHidden())
         self.count_label.setText(f"共 {visible_count} 个模组")
+        # 筛选变化可能让尚未建 widget 的行进入视野：补建当前可见范围
+        self._ensure_visible_row_widgets()
+        QTimer.singleShot(0, self._ensure_visible_row_widgets)
+
+    # ---------- 在线行 widget 懒构建（按可见区域动态补齐） ----------
+    def _create_online_row_widget(self, item, row):
+        """为单个 item 创建自绘行 widget（仅当 item 尚未有 widget 时）"""
+        try:
+            if self.mod_list.itemWidget(item) is not None:
+                return
+            mod_name = item.data(Qt.UserRole) or ""
+            if not mod_name or mod_name.startswith(("暂无", "⏳")):
+                return
+            widget = OnlineModListItemWidget(
+                mod_name=mod_name,
+                display_name=item.data(Qt.UserRole + 4) or mod_name,
+                is_installed=bool(item.data(Qt.UserRole + 1)),
+                has_update=bool(item.data(Qt.UserRole + 2)),
+                parent=self.mod_list,
+                list_item=item,
+            )
+            self.mod_list.setItemWidget(item, widget)
+            widget.action_btn.clicked.connect(
+                lambda checked=False, mn=mod_name, w=widget: self._on_action_clicked(mn, w)
+            )
+            state = self._row_transient.get(mod_name)
+            if state:
+                if state[0] == "downloading":
+                    widget.set_downloading(state[1])
+                elif state[0] == "installing":
+                    widget.set_installing()
+                elif state[0] == "done":
+                    widget.set_done(state[1])
+            # 若该行就是当前详情行，懒构建完成后补绑高亮，避免状态丢失
+            if self._current_mod == mod_name:
+                if self._current_widget is not widget:
+                    self._current_widget = widget
+                    widget.set_selected(True)
+            elif item.isSelected():
+                widget.set_selected(True)
+        except RuntimeError:
+            pass
+
+    def _on_list_scrolled(self, value):
+        # 滚动时值可能高频变化，构建本身廉价且有 widget 去重；直接同步补齐可见行即可
+        self._ensure_visible_row_widgets()
+
+    def _ensure_visible_row_widgets(self):
+        """只对“当前可见(+上下缓冲)”且尚无 widget 的行执行懒构建；
+        一次性创建几十个 widget（毫秒级），避免整表 600+ 全量创建卡顿"""
+        if getattr(self, "_ensuring_visible", False):
+            return
+        lst = self.mod_list
+        if lst.count() == 0 or not self.isVisible():
+            return
+        self._ensuring_visible = True
+        try:
+            # 先定位“首/末可见行”，只在附近补建，避免每次滚动都全表扫描
+            vp = lst.viewport()
+            h = vp.height()
+            first = lst.itemAt(QPoint(2, 2))
+            last = lst.itemAt(QPoint(2, max(0, h - 2)))
+            if first is None and last is None:
+                return
+            start = lst.row(first) if first is not None else 0
+            end = lst.row(last) if last is not None else lst.count() - 1
+            if start < 0:
+                start = 0
+            if end < 0:
+                end = lst.count() - 1
+            start = max(0, start - 2)          # 上下各多建 2 行做缓冲
+            end = min(lst.count() - 1, end + 2)
+
+            top = -80
+            bottom = h + 80
+            built = 0
+            for i in range(start, end + 1):
+                item = lst.item(i)
+                if item is None or item.isHidden():
+                    continue
+                if lst.itemWidget(item) is not None:
+                    continue
+                rect = lst.visualItemRect(item)
+                if rect.isEmpty():
+                    continue
+                if rect.bottom() < top or rect.top() > bottom:
+                    continue
+                self._create_online_row_widget(item, i)
+                built += 1
+                if built >= 60:
+                    break
+        finally:
+            self._ensuring_visible = False
 
     def _clear_selection(self):
         if self.mod_list.selectedItems():
@@ -2336,8 +2738,6 @@ class OnlineModPage(QWidget):
             self._current_widget.set_selected(False)
             self._current_widget = None
         self._current_mod = None
-        self.copy_link_btn.setEnabled(False)
-        self.copy_batch_btn.setEnabled(False)
         self.detail_scroll.detail_panel._show_empty_state()
 
     def _on_search_text_changed(self, text):
@@ -2366,10 +2766,12 @@ class OnlineModPage(QWidget):
             return
 
         current_widget = self.mod_list.itemWidget(item)
-        if current_widget is self._current_widget:
+        # 行 widget 可能是懒构建的（点击的那一瞬间可能尚未建出来），
+        # 因此以“同一行 + 同一 widget”为重复点击判断，避免漏刷详情
+        if current_widget is self._current_widget and current_widget is not None and self._current_mod == mod_name:
             return
 
-        if self._current_widget:
+        if self._current_widget and self._current_widget is not current_widget:
             self._current_widget.set_selected(False)
 
         if current_widget:
@@ -2403,63 +2805,294 @@ class OnlineModPage(QWidget):
                 mod_info=mod_info,
             )
 
-            if mod_info:
-                link = mod_info.get('link', '')
-                batch_links = mod_info.get('batch_links', [])
-                self.copy_link_btn.setEnabled(bool(link))
-                self.copy_batch_btn.setEnabled(bool(batch_links))
-            else:
-                self.copy_link_btn.setEnabled(False)
-                self.copy_batch_btn.setEnabled(False)
         except RuntimeError:
             pass
 
     def _on_action_clicked(self, mod_name, widget):
+        # 未安装 / 待更新的行按钮 = 一键下载安装入口；已是最新时按钮禁用不会走到这里
         if widget.is_installed and not widget.has_update:
             return
-
         if not self.parent or not hasattr(self.parent, 'resolver'):
             return
-
         for i in range(self.mod_list.count()):
             item = self.mod_list.item(i)
             if item.data(Qt.UserRole) == mod_name:
                 self._select_and_show_item(item)
                 break
+        # 待更新 -> 强制重装（忽略"已安装"状态），并安装前清掉 downloads 里的旧包
+        self._start_download(mod_name, force=bool(getattr(widget, "has_update", False)))
 
-        resolver = self.parent.resolver
-        if mod_name not in resolver.mod_data_by_name:
+    # ---------- M2 在线一键下载安装 ----------
+    def _refresh_quark_status(self):
+        """按 config.json 是否有 Cookie 刷新筛选栏状态色（不做网络请求）"""
+        try:
+            from utils.common import load_quark_cookie
+            has = bool(load_quark_cookie())
+            self.quark_chip.setText("夸克：已配置" if has else "夸克：未配置")
+            self.quark_chip.setStyleSheet(
+                ("color: #66bb6a; background: transparent; padding-left: 12px;")
+                if has else
+                ("color: #ff6b6b; background: transparent; padding-left: 12px;")
+            )
+        except Exception:
+            pass
+
+    def _open_quark_setting(self):
+        """打开夸克内嵌登录窗口（扫码 / 账密 / 手机号）；保存成功后同步状态"""
+        try:
+            from ui.quark_login_dialog import show_quark_login_dialog
+        except ImportError:
+            from quark_login_dialog import show_quark_login_dialog
+        saved = show_quark_login_dialog(self)
+        if saved:
+            self._refresh_quark_status()
+            self._show_copy_tip("夸克账号已保存")
+            if self.parent and hasattr(self.parent, '_log'):
+                self.parent._log("夸克账号已配置并保存", "success")
+        return saved
+
+    def _start_download(self, mod_name, force=False):
+        """一键下载并安装：算依赖计划时自动检测 downloads 是否已有安装包备份，
+        有则直接走本地安装（不再从夸克下载），缺的才在线补齐；全程无确认弹窗。
+
+        :param force: True 表示这是「待更新」触发的更新安装：即使已装也重新下载，
+                      并先清掉 downloads 里属于该 Mod 的旧安装包（只留最新一份）。
+        """
+        if not mod_name:
+            return
+        # 多任务并行：每批一个独立后台线程。批内 zip 由 core.online_install 并发下载
+        # （本体 + 缺失前置同时下，同名共享依赖全局只下一次）。下载过的安装包 zip 会
+        # 留在 downloads 里，卸载/重装时直接命中本地缓存安装，不再重新从夸克下载。
+
+        parent = self.parent
+        game_path = getattr(parent, 'game_path', '') if parent else ''
+        if not game_path:
+            QMessageBox.warning(self, "尚未选择游戏", "请先在「首页」指定空洞骑士游戏根目录（含 hollow_knight.exe）后再下载安装。")
             return
 
-        batch_links = resolver.mod_data_by_name[mod_name].get('batch_links', [])
-        if not batch_links:
+        resolver = getattr(parent, 'resolver', None) if parent else None
+        if not resolver or not hasattr(resolver, 'mod_data_by_name') or mod_name not in resolver.mod_data_by_name:
             return
 
-        QApplication.clipboard().setText("\n".join(batch_links))
-        self._show_copy_tip("已复制本体+前置地址")
-
-    def _copy_mod_link(self):
-        if not self._current_mod or not self.parent:
+        from utils.common import load_app_setting, load_quark_cookie
+        from core.online_install import (collect_install_plan, local_ready_result,
+                                         purge_local_packages)
+        plan = collect_install_plan(game_path, mod_name, resolver, force=force)
+        tasks = plan.get('tasks') or []
+        if not tasks:
+            self._show_copy_tip("该 Mod 及其依赖均已是本地最新，无需操作")
             return
 
-        resolver = self.parent.resolver
-        if hasattr(resolver, 'mod_data_by_name') and self._current_mod in resolver.mod_data_by_name:
-            link = resolver.mod_data_by_name[self._current_mod].get('link', '')
-            if link:
-                QApplication.clipboard().setText(link)
-                self._show_copy_tip("已复制本体地址")
-
-    def _copy_batch_links(self):
-        if not self._current_mod or not self.parent:
+        # 同一个 Mod 正在下载/安装时不再开新批：否则弹窗会出现「xxx ·2」重复行，
+        # 且两批并行装同一个 Mod 也没有意义
+        if mod_name in getattr(self, "_active_batch_targets", set()):
+            self._show_copy_tip(f"「{mod_name}」正在下载/安装中，请等待当前批次完成")
             return
 
-        resolver = self.parent.resolver
-        if hasattr(resolver, 'mod_data_by_name') and self._current_mod in resolver.mod_data_by_name:
-            batch_links = resolver.mod_data_by_name[self._current_mod].get('batch_links', [])
-            if batch_links:
-                QApplication.clipboard().setText("\n".join(batch_links))
-                self._show_copy_tip("已复制本体+前置地址")
+        # 更新安装：先清掉 downloads 里该 Mod 的旧包（必须在缓存预判之前，
+        # 否则会把旧包当成"本地缓存命中"又装回去）
+        if force:
+            purged = purge_local_packages(mod_name)
+            if purged and parent and hasattr(parent, '_log'):
+                parent._log(f"🧹 已清理旧安装包：{'、'.join(purged)}", "info")
+
+        # 本地就绪预判（一次算好，下面复用）：
+        #   None                 -> 需要联网下载
+        #   {"skip": 目录}        -> 已安装同版本，会静默跳过
+        #   {"zip": 路径}         -> 本地缓存直接安装
+        ready_map = {t.get('name', ''): local_ready_result(game_path, t) for t in tasks}
+
+        # 本批是否真的需要联网下载：只有存在 downloads 里也没有的安装包时，
+        # 才需要夸克账号；全部命中本地缓存则完全离线、直接安装。
+        need_net = any(v is None for v in ready_map.values())
+
+        # 弹窗只显示"真正要做事"的任务：已安装同版本（会静默 skip）的不占一行，
+        # 重复名兜底去重；过滤掉的任务仍会传给 Worker，由安装阶段正常跳过
+        names = []
+        _seen_names = set()
+        for t in tasks:
+            n = t.get('name', '')
+            if not n or n in _seen_names:
+                continue
+            _seen_names.add(n)
+            res = ready_map.get(n)
+            # 强制更新时目标 Mod 一定显示（即使预判为 skip 也要走一遍重新安装）
+            if res and "skip" in res and not (force and n == mod_name):
+                continue
+            names.append(n)
+        if not names:
+            self._show_copy_tip("该 Mod 及其依赖均已是本地最新，无需操作")
+            return
+        # 真正需要留意的异常（依赖不在在线列表 / 未配置下载链接）以非阻塞方式
+        # 写入日志窗口，不打断下载。
+        if plan.get('offline_deps'):
+            if parent and hasattr(parent, '_log'):
+                parent._log("⚠️ 以下依赖不在在线列表，请自行处理：" + "、".join(plan['offline_deps']), "warn")
+        if plan.get('no_link'):
+            if parent and hasattr(parent, '_log'):
+                parent._log("⚠️ 以下条目未配置下载链接，需手动下载：" + "、".join(plan['no_link']), "warn")
+
+        if not need_net:
+            tip = "downloads 已有所需安装包，直接本地安装，无需从夸克下载"
+            self._show_copy_tip(tip)
+            if parent and hasattr(parent, '_log'):
+                parent._log("✔ " + tip, "success")
+        elif not load_quark_cookie():
+            # 真有要下的包才设夸克登录门槛；纯本地安装不拦。
+            ret = QMessageBox.question(
+                self, "需要夸克账号",
+                "下载 Mod 需要登录夸克网盘。是否现在打开夸克登录窗口（扫码即可）？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ret != QMessageBox.Yes or not self._open_quark_setting():
+                return
+
+        # 目标行切到「下载中 / 安装中」态（写入 transient，
+        # 保证懒构建尚未出现的行在补建 widget 时也能带上正确状态）
+        self._row_transient[mod_name] = ('downloading', None) if need_net else ('installing',)
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item.data(Qt.UserRole) == mod_name:
+                w = self.mod_list.itemWidget(item)
+                if w:
+                    if need_net:
+                        w.set_downloading(None)
+                    else:
+                        w.set_installing()
+                break
+
+        # 弹出悬浮进度面板：登记本批计划（目标 + 缺失依赖）。
+        # 可并行：重复点击会新增一批，各批独立线程同时下载，互不阻塞。
+        parallel = int(load_app_setting("parallel_downloads", 8) or 8)
+        self._batch_seq += 1
+        batch_id = f"dl{self._batch_seq}"
+        self._batch_results[batch_id] = (mod_name, True, "")
+        self._active_batch_targets.add(mod_name)
+        # 登记本批所有任务，整体进度条据此聚合并行下载 + 安装的总进度
+        for _n in {t.get("name", "") for t in tasks if t.get("name")}:
+            _k = (batch_id, _n)
+            self._prog[_k] = 0.0
+            self._prog_active.add(_k)
+        self._update_overall_progress()
+        worker = OnlineDownloadWorker(game_path, batch_id, mod_name, tasks,
+                                      parallel=max(1, min(16, parallel)), parent=self)
+        worker.log.connect(self._on_worker_log)
+        worker.progress.connect(self._on_download_progress)
+        worker.task_started.connect(self._on_task_started)
+        worker.installing.connect(self._on_installing)
+        worker.task_done.connect(self._on_task_done)
+        worker.stage.connect(self._on_worker_stage)
+        worker.finished.connect(self._on_download_finished)
+        self._workers.append(worker)
+        worker.start()
+
+    # ---------- 整体进度聚合（替代原日志区） ----------
+    def _update_overall_progress(self):
+        """汇总所有并行下载 + 安装任务的整体进度，刷新底部进度条。
+        每个任务权重相同：下载占 0~0.9，安装占 0.95，完成记 1.0。"""
+        if not self._prog_active:
+            self._prog_card.setVisible(False)
+            self._prog_bar.setValue(100)
+            self._prog_label.setText("整体进度 100%")
+            return
+        self._prog_card.setVisible(True)
+        total = sum(self._prog.get(k, 0.0) for k in self._prog_active)
+        pct = int(total / len(self._prog_active) * 100)
+        self._prog_bar.setValue(pct)
+        self._prog_label.setText(f"整体进度 {pct}%  ·  进行中 {len(self._prog_active)} 项")
+
+    def _on_worker_log(self, message, level):
+        # 日志区已移除：仅把警告/错误转给主窗口全局日志，确保失败可见
+        lvl = (level or "").lower()
+        if lvl in ("warn", "warning", "error", "fail") \
+                and self.parent and hasattr(self.parent, '_log'):
+            self.parent._log(message, level)
+
+    def _on_task_started(self, batch_id, name):
+        key = (batch_id, name)
+        self._prog.setdefault(key, 0.0)
+        self._prog_active.add(key)
+        self._update_overall_progress()
+
+    def _on_worker_stage(self, message):
+        # 阶段细节不再展示（日志区已移除，整体进度条足够反映进度）
+        pass
+
+    def _on_download_progress(self, batch_id, name, pct):
+        if not name:
+            return
+        key = (batch_id, name)
+        if key in self._prog_active:
+            # 下载占整体任务的 0~0.9，安装另占 0.95，完成记 1.0
+            self._prog[key] = max(self._prog.get(key, 0.0), (pct / 100.0) * 0.9)
+            self._update_overall_progress()
+        self._row_transient[name] = ('downloading', pct)
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item.data(Qt.UserRole) == name:
+                w = self.mod_list.itemWidget(item)
+                if w:
+                    w.set_downloading(pct)
+                break
+
+    def _on_task_done(self, batch_id, name, status):
+        key = (batch_id, name)
+        self._prog[key] = 1.0
+        self._prog_active.discard(key)
+        self._update_overall_progress()
+        self._row_transient[name] = ('done', status)
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item.data(Qt.UserRole) == name:
+                w = self.mod_list.itemWidget(item)
+                if w:
+                    w.set_done(status)
+                break
+
+    def _on_installing(self, batch_id, task):
+        key = (batch_id, task)
+        self._prog[key] = 0.95
+        self._prog_active.add(key)
+        self._update_overall_progress()
+        self._row_transient[task] = ('installing',)
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item.data(Qt.UserRole) == task:
+                w = self.mod_list.itemWidget(item)
+                if w:
+                    w.set_installing()
+                break
+
+    def _on_download_finished(self, batch_id, ok, mod_name, message):
+        self._workers = [w for w in self._workers if w is not self.sender()]
+        self._active_batch_targets.discard(mod_name)
+        self._batch_results[batch_id] = (mod_name, ok, message)
+        # 本批结束：清理其进度登记，让整体进度条回落到其余在跑批次 / 无任务时隐藏
+        for _k in [k for k in self._prog if k[0] == batch_id]:
+            self._prog.pop(_k, None)
+        self._prog_active = {k for k in self._prog_active if k[0] != batch_id}
+        self._update_overall_progress()
+        if self._workers:
+            return
+        try:
+            if self.parent and hasattr(self.parent, 'game_path'):
+                self.refresh_mod_list(self.parent.game_path or '')
+        except RuntimeError:
+            pass
+        results = list(self._batch_results.values())
+        self._batch_results.clear()
+        if all(ok for _label, ok, _msg in results):
+            self._show_copy_tip("安装完成")
+            QMessageBox.information(self, "下载安装完成", "全部 Mod 安装完成")
+        else:
+            fails = [f"· {label}：{msg}" for label, ok, msg in results if not ok]
+            QMessageBox.critical(self, "下载安装失败", "存在失败项：\n" + "\n".join(fails))
 
     def _is_mod_installed(self, mod_name):
-        local_mods = parse_modlog()
-        return normalize_name(mod_name) in local_mods
+        """在线详情页「前置依赖」判定：以游戏 Mods/Disabled 目录真实文件为准（与列表页一致，不依赖 ModLog）"""
+        try:
+            if not self._game_path:
+                return False
+            from core.online_install import installed_mod_set
+            return normalize_name(mod_name) in installed_mod_set(self._game_path)
+        except Exception:
+            return False

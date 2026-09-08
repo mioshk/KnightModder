@@ -11,7 +11,7 @@ import sys
 from config import (
     CONFIG_FILE, MODS_RELATIVE_PATH,
     API_ZIP_MAP, API_FOLDER_NAME,
-    STEAM_APPID,
+    STEAM_APPID, DOWNLOAD_DIR_NAME,
     get_base_dir,
 )
 
@@ -38,6 +38,11 @@ def get_api_folder_path():
     return os.path.join(get_base_dir(), API_FOLDER_NAME)
 
 
+def get_download_dir():
+    """获取软件下载目录（软件根目录下的 downloads 文件夹）"""
+    return os.path.join(get_base_dir(), DOWNLOAD_DIR_NAME)
+
+
 def get_save_folder():
     """获取游戏存档文件夹路径"""
     s = get_system_type()
@@ -60,13 +65,57 @@ def load_saved_path():
     return ""
 
 
-def save_path(path):
-    """保存游戏路径到配置文件"""
+def _read_config() -> dict:
+    """读取整个 config.json（文件缺失/损坏时返回空字典）"""
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"game_path": path}, f, ensure_ascii=False)
+        if os.path.isfile(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
     except Exception:
         pass
+    return {}
+
+
+def _write_config(data: dict) -> bool:
+    """整体写回 config.json（保留其它键）"""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def save_path(path):
+    """保存游戏路径到配置文件（保留 quark_cookie 等其它字段）"""
+    data = _read_config()
+    data["game_path"] = path
+    _write_config(data)
+
+
+def load_quark_cookie() -> str:
+    """从 config.json 读取已保存的夸克 Cookie 头（空串表示未配置）"""
+    return _read_config().get("quark_cookie", "") or ""
+
+
+def save_quark_cookie(cookie: str) -> bool:
+    """把夸克 Cookie 头写入 config.json（保留 game_path 等其它字段）"""
+    data = _read_config()
+    data["quark_cookie"] = (cookie or "").strip()
+    return _write_config(data)
+
+
+def load_app_setting(key, default=None):
+    """读取 config.json 里的任意自定义设置项（并行下载数等）"""
+    return _read_config().get(key, default)
+
+
+def save_app_setting(key, value) -> bool:
+    """把自定义设置项写入 config.json（保留 game_path 等其它字段）"""
+    data = _read_config()
+    data[key] = value
+    return _write_config(data)
 
 
 def normalize_path(path):

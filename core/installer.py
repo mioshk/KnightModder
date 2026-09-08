@@ -15,8 +15,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir
-from utils.common import get_api_zip_path, get_api_folder_path, get_game_exe_path, get_mods_dir, safe_requests_get, fetch_remote_content, is_steam_official_path
+from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir, API_ZIP_MAP, API_QUARK_LINKS
+from utils.common import get_game_exe_path, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path
+from core.quark import QuarkClient, QuarkError
 
 
 # ==================== 文件工具函数 ====================
@@ -219,56 +220,194 @@ def scan_and_update_metadata(game_path, progress_callback=None):
     return metadata
 
 
-# ==================== API 安装与还原 ====================
+# ==================== API 安装与还原（对齐 Lumafly 三文件互换） ====================
 
-def install_api(game_path, progress_callback=None):
+# 游戏实际加载的 dll，以及 Lumafly 式的原版 / 模组版备份文件名
+_DLL_NAME = "Assembly-CSharp.dll"
+_VANILLA_SUFFIX = ".v"
+_MODDED_SUFFIX = ".m"
+
+
+def _api_paths(managed):
+    """返回 (当前dll, 原版备份, 模组版备份) 三个绝对路径"""
+    cur = os.path.join(managed, _DLL_NAME)
+    van = os.path.join(managed, _DLL_NAME + _VANILLA_SUFFIX)
+    mod = os.path.join(managed, _DLL_NAME + _MODDED_SUFFIX)
+    return cur, van, mod
+
+
+def _is_modded_dll(dll_path):
     """
-    安装Modding API到游戏目录
-    :param game_path: 游戏根目录
-    :param progress_callback: 进度回调函数
+    判断 dll 是否为已注入 Modding API 的版本（对齐 Lumafly 的 Mono.Cecil 检测）。
+    Lumafly 用 Cecil 读 ModHooks 类型判定；Python 里整读 dll 字节，命中注入进
+    Assembly-CSharp.dll 的 'ModHooks' / 'ModLoader' 类型名即视为模组版；原版 dll
+    不含这些字符串（已用 API/ 自带原版 dll 校准，不会误判）。
+    """
+    if not os.path.isfile(dll_path):
+        return False
+    try:
+        with open(dll_path, "rb") as f:
+            data = f.read()  # dll 约数 MB，整读以可靠命中元数据中的类型名
+    except Exception:
+        return False
+    return b"ModHooks" in data or b"ModLoader" in data
+
+
+def get_api_state(game_path):
+    """
+    返回当前 API 状态字典：
+      enabled            : 当前加载的是否为模组版（True=模组版, False=原版）
+      has_api            : 是否曾安装过 API（.m 备份存在）
+      has_vanilla_backup : 是否有原版备份（.v 存在且确为原版）
     """
     managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
-    if not os.path.isdir(managed):
-        if progress_callback:
-            progress_callback("❌ 未找到 Managed 文件夹", "error")
-        raise NotADirectoryError(f"未找到 Managed：{managed}")
+    cur, van, mod = _api_paths(managed)
+    current_modded = _is_modded_dll(cur)
+    has_vanilla_backup = os.path.isfile(van) and not _is_modded_dll(van)
+    if current_modded:
+        return {"enabled": True, "has_api": True, "has_vanilla_backup": has_vanilla_backup}
+    return {"enabled": False, "has_api": os.path.isfile(mod),
+            "has_vanilla_backup": has_vanilla_backup}
 
-    zp = get_api_zip_path()
-    if not os.path.isfile(zp):
-        if progress_callback:
-            progress_callback("❌ API 压缩包不存在", "error")
-        raise FileNotFoundError(f"API 压缩包不存在：{zp}")
 
-    # 静默解压，不打日志
-    with zipfile.ZipFile(zp, 'r') as zf:
+def _resolve_api_package(status_callback, progress_callback):
+    """
+    取得 API 安装包：downloads/ 里已有则优先用本地缓存；否则从夸克网盘下载
+    （下载后落盘到 downloads/ 供下次离线复用）。
+    :return: 本地 zip 路径
+    """
+    system = get_system_type()
+    if system not in API_ZIP_MAP:
+        raise RuntimeError(f"不支持的系统：{system}")
+    zip_name = API_ZIP_MAP[system]
+    link = API_QUARK_LINKS.get(system)
+    dl_dir = get_download_dir()
+    os.makedirs(dl_dir, exist_ok=True)
+    local_path = os.path.join(dl_dir, zip_name)
+
+    # 本地缓存优先：命中则直接复用，无需触碰夸克
+    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+        status_callback(f"使用本地缓存的 API 安装包：{zip_name}", "info")
+        return local_path
+
+    if not link:
+        raise RuntimeError(f"未配置 {system} 的夸克 API 下载链接")
+
+    cookie = load_quark_cookie()
+    if not cookie:
+        raise QuarkError("尚未配置夸克账号。请先点击顶部「设置」→「登录夸克账号」后再安装 API")
+
+    status_callback("正在从夸克网盘下载 API 安装包...", "info")
+    client = QuarkClient(
+        cookie_str=cookie,
+        status_callback=lambda msg, lvl: status_callback(msg, lvl),
+        progress_callback=progress_callback or (lambda *a: None),
+    )
+    if not client.is_logged_in:
+        raise QuarkError("夸克 Cookie 已失效，请重新在「设置 → 夸克账号」中更新")
+
+    platform_key = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}[system]
+
+    def _sel(f):
+        n = str(f.get("file_name") or "").lower()
+        return platform_key in n and n.endswith(".zip")
+
+    try:
+        dest_dir = client.download_share(link, local_dir=dl_dir,
+                                         remote_dir_name="api", select_file=_sel)
+    except QuarkError:
+        # 兜底：下载分享里任意 zip（分享内文件名不含平台关键字时）
+        dest_dir = client.download_share(
+            link, local_dir=dl_dir, remote_dir_name="api",
+            select_file=lambda f: str(f.get("file_name") or "").lower().endswith(".zip"))
+
+    # 在返回目录里定位 zip：优先平台名匹配的
+    for root, _dirs, files in os.walk(dest_dir):
+        for fn in files:
+            if fn.lower().endswith(".zip") and platform_key in fn.lower():
+                return os.path.join(root, fn)
+    for root, _dirs, files in os.walk(dest_dir):
+        for fn in files:
+            if fn.lower().endswith(".zip"):
+                return os.path.join(root, fn)
+    raise FileNotFoundError("夸克下载目录中未找到 API 压缩包")
+
+
+def install_api(game_path, status_callback=None, progress_callback=None):
+    """
+    安装 / 启用 Modding API（对齐 Lumafly 的「安装即备份、开关靠互换」机制）：
+      - 全新安装：先备份当前原版 dll -> .v；下载/解压 API 包覆盖 Managed；再备份
+        模组版 dll -> .m。
+      - 已装但被关：直接把模组版 .m 切回 Current（无需下载）。
+      - 已启用：幂等，无操作（仅确保 .m 备份存在）。
+    """
+    status_callback = status_callback or (lambda *a: None)
+    managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
+    os.makedirs(managed, exist_ok=True)
+    cur, van, mod = _api_paths(managed)
+    state = get_api_state(game_path)
+
+    if state["enabled"]:
+        # 已启用：确保模组版备份存在，便于日后「还原原版」互换
+        if os.path.isfile(cur) and not os.path.isfile(mod):
+            shutil.copy2(cur, mod)
+        status_callback("Modding API 已处于启用状态", "info")
+        return state
+
+    if state["has_api"] and not state["enabled"]:
+        # 已装但被关：当前是原版 -> 备份为 .v，再把 .m 切回 Current
+        if os.path.isfile(cur) and not os.path.isfile(van):
+            shutil.copy2(cur, van)
+        if os.path.isfile(cur):
+            shutil.move(cur, van)
+        shutil.move(mod, cur)
+        status_callback("已重新启用 Modding API（模组版）", "success")
+        return get_api_state(game_path)
+
+    # —— 全新安装 ——
+    # 1) 备份用户自己的原版 dll（仅当当前确为原版且尚无备份）
+    if os.path.isfile(cur) and not _is_modded_dll(cur) and not os.path.isfile(van):
+        shutil.copy2(cur, van)
+
+    # 2) 取得安装包（本地缓存优先，否则夸克下载）并解压覆盖 Managed
+    zip_path = _resolve_api_package(status_callback, progress_callback)
+    with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(managed)
 
-    if progress_callback:
-        progress_callback("✅ API 安装完成！", "success")
+    # 3) 备份新装的模组版 dll
+    if os.path.isfile(cur):
+        shutil.copy2(cur, mod)
+
+    status_callback("✅ Modding API 安装完成！", "success")
+    return get_api_state(game_path)
 
 
-def restore_vanilla(game_path, progress_callback=None):
+def restore_vanilla(game_path, status_callback=None):
     """
-    还原原版游戏（移除API，保留Mods文件夹）
-    :param game_path: 游戏根目录
-    :param progress_callback: 进度回调函数
+    还原原版（对齐 Lumafly 的「关掉 API」= 把原版 dll 切回 Current）：
+      - 若 .v 原版备份存在：Current(模组) -> .m，.v -> Current，游戏加载原版。
+      - 若 .v 缺失：无法离线还原，返回 {"ok": False, "reason": "no_vanilla_backup"}，
+        由调用方提示用户用 Steam「验证游戏完整性」恢复官方原版。
     """
+    status_callback = status_callback or (lambda *a: None)
     managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
-    orig = os.path.join(managed, "Assembly-CSharp.dll")
+    cur, van, mod = _api_paths(managed)
+    state = get_api_state(game_path)
 
-    api_folder = get_api_folder_path()
-    api_dll_path = os.path.join(api_folder, "Assembly-CSharp.dll")
+    # 当前已是原版（没装 API，或已被关且原版就位）：无需操作
+    if not state["enabled"]:
+        status_callback("当前已是原版游戏，无需还原", "info")
+        return {"ok": True, "already_vanilla": True}
 
-    if not os.path.isfile(api_dll_path):
-        if progress_callback:
-            progress_callback("❌ API 文件夹中未找到 Assembly-CSharp.dll", "error")
-        raise FileNotFoundError(f"API 文件夹中未找到 Assembly-CSharp.dll：{api_dll_path}")
+    # 当前是模组版，需切回原版
+    if not state["has_vanilla_backup"]:
+        return {"ok": False, "reason": "no_vanilla_backup"}
 
-    # 静默复制，不打"正在还原"日志
-    shutil.copy2(api_dll_path, orig)
-
-    if progress_callback:
-        progress_callback("✅ 已还原原版 dll", "success")
+    # 互换：Current(模组) -> .m；.v -> Current
+    shutil.move(cur, mod)
+    shutil.move(van, cur)
+    status_callback("✅ 已还原为原版游戏（Modding API 已关闭）", "success")
+    return {"ok": True, "already_vanilla": False}
 
 
 # ==================== Mod 安装 ====================
@@ -736,6 +875,20 @@ class DependencyResolver:
                 qlink_elem = mod.find('./QLink')
                 qlink = qlink_elem.text.strip() if qlink_elem is not None and qlink_elem.text else ""
 
+                # 提取远程安装包文件名（分享内的 zip 名，用于下载后精确匹配）
+                download_name_elem = mod.find('./DownloadName')
+                download_name = download_name_elem.text.strip() if download_name_elem is not None and download_name_elem.text else ""
+
+                # 提取远程安装包 sha256（分享 zip 的哈希，用于“已是最新/可更新”判断与防损坏校验）
+                # 注意：线上数据源用的是全大写 <SHA256>，而早期本地 XML 用 <Sha256>，
+                # ElementTree.find 区分大小写，必须按大小写不敏感匹配，否则 online_sha 恒为空、
+                # 所有 Mod 的“待更新”判定都会失效（一律显示已安装）。
+                sha256 = ""
+                for _child in mod:
+                    if _child.tag.lower() == "sha256" and _child.text:
+                        sha256 = _child.text.strip()
+                        break
+
                 # 提取夸克网盘批量链接
                 qlinks_elem = mod.find('./QLinks')
                 qlinks = []
@@ -773,6 +926,8 @@ class DependencyResolver:
                     "version": version,
                     "link": qlink,
                     "batch_links": qlinks,
+                    "download_name": download_name,
+                    "sha256": sha256,
                     "dependencies": deps,
                     "tags": tags,
                     "desc_cn": desc_cn,

@@ -20,6 +20,7 @@ API_FOLDER_NAME = "API"
 MODS_RELATIVE_PATH = r"hollow_knight_Data\Managed\Mods"
 MANAGED_RELATIVE_PATH = r"hollow_knight_Data\Managed"
 CONFIG_FILE = "config.json"
+DOWNLOAD_DIR_NAME = "downloads"
 
 # ---------- 网络资源 URL ----------
 # 每个 GitHub 仓库文件均提供双源：
@@ -47,11 +48,18 @@ README_URL_RAW = f"{GH_RAW_BASE}/README.md"
 USAGE_URL_CDN = f"{GH_CDN_BASE}/USAGE.md"
 USAGE_URL_RAW = f"{GH_RAW_BASE}/USAGE.md"
 
-# ---------- API 压缩包平台映射 ----------
+# ---------- API 压缩包平台映射（同时用作 downloads/ 本地缓存文件名） ----------
 API_ZIP_MAP = {
     "Windows": "moddingapi.v77.windows.zip",
     "Darwin":  "moddingapi.v77.macos.zip",
     "Linux":   "moddingapi.v77.linux.zip",
+}
+
+# ---------- Modding API 夸克网盘分享链接（按平台，参考 Lumafly 直接从网盘安装） ----------
+API_QUARK_LINKS = {
+    "Windows": "https://pan.quark.cn/s/34e4c3074b81",
+    "Darwin":  "https://pan.quark.cn/s/b3725b4ea36c",
+    "Linux":   "https://pan.quark.cn/s/f1c7df8142fb",
 }
 
 # ---------- 暗黑极简配色方案 ----------
