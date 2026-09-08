@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
 )
 from config import (
     APP_NAME,
-    MANAGED_RELATIVE_PATH,
     USAGE_URL_CDN,
     USAGE_URL_RAW,
     STEAM_APPID,
@@ -57,7 +56,10 @@ from utils import (
     normalize_path,
     get_root_from_exe,
     get_asset_path,
+    get_managed_dir,
     get_mods_dir,
+    get_game_exe_path,
+    open_path,
     is_unity_mutex_held,
     is_steam_official_path,
     get_save_folder,
@@ -382,7 +384,7 @@ class MainWindow(QMainWindow):
             return False
         if not os.path.isdir(p):
             return False
-        if not os.path.isdir(os.path.join(p, MANAGED_RELATIVE_PATH)):
+        if not os.path.isdir(get_managed_dir(p)):
             return False
         return True
 
@@ -400,7 +402,7 @@ class MainWindow(QMainWindow):
         p = load_saved_path()
         if not p:
             return
-        if os.path.isdir(os.path.join(p, MANAGED_RELATIVE_PATH)):
+        if os.path.isdir(get_managed_dir(p)):
             self.game_path = p
             self.path_input.setText(self._display_path(p))
 
@@ -1244,7 +1246,7 @@ class MainWindow(QMainWindow):
         else:
             game_path = text
 
-        if os.path.isdir(os.path.join(game_path, MANAGED_RELATIVE_PATH)):
+        if os.path.isdir(get_managed_dir(game_path)):
             self._commit_path(game_path)
 
     def _browse_exe(self):
@@ -1280,7 +1282,7 @@ class MainWindow(QMainWindow):
         if p.endswith('.exe'):
             p = get_root_from_exe(p)
 
-        if not os.path.isdir(os.path.join(p, MANAGED_RELATIVE_PATH)):
+        if not os.path.isdir(get_managed_dir(p)):
             if not silent:
                 QMessageBox.warning(self, "错误", "路径无效，未找到 Managed 文件夹")
             return False
@@ -1429,12 +1431,19 @@ class MainWindow(QMainWindow):
 
         try:
             import subprocess
-            exe_path = os.path.join(game_path, "hollow_knight.exe")
-            self.game_process = subprocess.Popen(
-                [exe_path],
-                cwd=game_path,
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-            )
+            exe_path = get_game_exe_path(game_path)
+            if not exe_path:
+                QMessageBox.warning(self, "启动失败", "未找到游戏可执行文件，请确认游戏路径设置正确")
+                return
+            if sys.platform == "darwin":
+                # macOS 必须经由 open 启动 .app（直接 Popen .app 路径无效）
+                self.game_process = subprocess.Popen(["open", exe_path])
+            else:
+                self.game_process = subprocess.Popen(
+                    [exe_path],
+                    cwd=game_path,
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
+                )
             self.game_pid = self.game_process.pid
             # 立即锁定按钮为「停止游戏」状态，防止 Unity 进程出现前的窗口期重复点击
             self.launch_btn.update_style(True)
@@ -1454,6 +1463,8 @@ class MainWindow(QMainWindow):
 
         def _check():
             import time as _t
+            if sys.platform != "win32":
+                return
             _t.sleep(delay)
             try:
                 import subprocess
@@ -1488,7 +1499,7 @@ class MainWindow(QMainWindow):
     def _open_with_steam(self):
         """通过 Steam 协议直接启动《空洞骑士》（Steam AppID: 367520）"""
         try:
-            os.startfile(STEAM_RUN_URL)
+            open_path(STEAM_RUN_URL)
             self._log("🎮 已请求 Steam 启动《空洞骑士》", "success")
         except Exception as e:
             self._log(f"❌ 无法唤起 Steam：{e}", "error")
@@ -1636,7 +1647,7 @@ class MainWindow(QMainWindow):
         os.makedirs(d, exist_ok=True)
 
         try:
-            os.startfile(d)
+            open_path(d)
         except Exception as e:
             QMessageBox.warning(self, "打开失败", str(e))
 
@@ -1647,7 +1658,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            os.startfile(d)
+            open_path(d)
         except Exception as e:
             QMessageBox.warning(self, "打开失败", str(e))
 

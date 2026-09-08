@@ -15,8 +15,8 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MANAGED_RELATIVE_PATH, MODS_RELATIVE_PATH, MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir, API_ZIP_MAP, API_QUARK_LINKS
-from utils.common import get_game_exe_path, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path
+from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir, API_ZIP_MAP, API_QUARK_LINKS
+from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path
 from core.quark import QuarkClient, QuarkError
 
 
@@ -260,7 +260,7 @@ def get_api_state(game_path):
       has_api            : 是否曾安装过 API（.m 备份存在）
       has_vanilla_backup : 是否有原版备份（.v 存在且确为原版）
     """
-    managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
+    managed = get_managed_dir(game_path)
     cur, van, mod = _api_paths(managed)
     current_modded = _is_modded_dll(cur)
     has_vanilla_backup = os.path.isfile(van) and not _is_modded_dll(van)
@@ -342,7 +342,7 @@ def install_api(game_path, status_callback=None, progress_callback=None):
       - 已启用：幂等，无操作（仅确保 .m 备份存在）。
     """
     status_callback = status_callback or (lambda *a: None)
-    managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
+    managed = get_managed_dir(game_path)
     os.makedirs(managed, exist_ok=True)
     cur, van, mod = _api_paths(managed)
     state = get_api_state(game_path)
@@ -390,7 +390,7 @@ def restore_vanilla(game_path, status_callback=None):
         由调用方提示用户用 Steam「验证游戏完整性」恢复官方原版。
     """
     status_callback = status_callback or (lambda *a: None)
-    managed = os.path.join(game_path, MANAGED_RELATIVE_PATH)
+    managed = get_managed_dir(game_path)
     cur, van, mod = _api_paths(managed)
     state = get_api_state(game_path)
 
@@ -419,7 +419,7 @@ def install_mods(game_path, file_paths, progress_callback=None):
     :param file_paths: Mod文件路径列表
     :param progress_callback: 进度回调函数
     """
-    mods_dir = os.path.join(game_path, MODS_RELATIVE_PATH)
+    mods_dir = get_mods_dir(game_path)
     os.makedirs(mods_dir, exist_ok=True)
 
     success_count = 0
@@ -495,11 +495,12 @@ def launch_game(game_path, progress_callback=None):
     :param game_path: 游戏根目录
     :param progress_callback: 进度回调函数
     """
+    system = get_system_type()
     exe_path = get_game_exe_path(game_path)
     if not exe_path:
         if progress_callback:
-            progress_callback("❌ 未找到 hollow_knight.exe", "error")
-        raise FileNotFoundError(f"未找到 hollow_knight.exe：{game_path}")
+            progress_callback("❌ 未找到游戏可执行文件", "error")
+        raise FileNotFoundError(f"未找到游戏可执行文件：{game_path}")
 
     try:
         # 仅当用户选择的是 Steam 官方安装目录（与 Steam 库注册的 AppID 安装位置
@@ -508,11 +509,18 @@ def launch_game(game_path, progress_callback=None):
         # 自定义副本（哪怕放在 steamapps\\common 下）必须直启用户指定目录，否则
         # steam:// 会无视选择、永远启动 Steam 库里的官方版。
         if is_steam_official_path(game_path, STEAM_APPID):
-            os.startfile(STEAM_RUN_URL)
+            if system == "Windows":
+                os.startfile(STEAM_RUN_URL)
+            else:
+                subprocess.Popen(["open" if system == "Darwin" else "xdg-open", STEAM_RUN_URL])
             if progress_callback:
                 progress_callback("✅ 已请求 Steam 启动游戏", "success")
             return
-        subprocess.Popen([exe_path], cwd=game_path)
+        if system == "Darwin":
+            # macOS 必须经由 open 启动 .app（直接 Popen .app 路径无效）
+            subprocess.Popen(["open", exe_path])
+        else:
+            subprocess.Popen([exe_path], cwd=game_path)
         if progress_callback:
             progress_callback("✅ 游戏已启动", "success")
     except Exception as e:

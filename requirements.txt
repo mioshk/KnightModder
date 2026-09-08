@@ -1,0 +1,4 @@
+# 运行依赖
+PySide6>=6.5
+psutil>=5.9
+requests>=2.28

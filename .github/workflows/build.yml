@@ -1,0 +1,85 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# 创建 Release 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            py: '3.11'
+          - os: macos-latest
+            py: '3.11'
+          - os: ubuntu-latest
+            py: '3.11'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build with PyInstaller
+        run: python build.py
+
+      - name: Sign (macOS)
+        # 用 entitlements 做 ad-hoc 重签 + 强化运行时（hardened runtime），
+        # 保证 QtWebEngine 在本机/受信任设备可直接运行（分发给他人仍需 Developer ID + notarization）
+        if: matrix.os == 'macos-latest'
+        run: |
+          find dist -name '*.app' -exec codesign --force --deep --options runtime --sign - --entitlements entitlements.plist {} \;
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KnightModder-${{ matrix.os }}
+          path: |
+            dist/KnightModder.exe
+            dist/KnightModder.app
+            dist/KnightModder
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    # 仅在有 tag 的推送时自动建 Release（手动触发只产出 artifact）
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: KnightModder-*
+          merge-multiple: true
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p upload
+          [ -f artifacts/KnightModder.exe ] && cp artifacts/KnightModder.exe upload/KnightModder-windows.exe
+          [ -d artifacts/KnightModder.app ] && cp -R artifacts/KnightModder.app upload/KnightModder-macos.app
+          [ -f artifacts/KnightModder ]      && cp artifacts/KnightModder      upload/KnightModder-linux
+          ls -la upload
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: upload/*
+          generate_release_notes: true

@@ -16,8 +16,6 @@ STEAM_APPID = "367520"
 STEAM_RUN_URL = "steam://rungameid/367520"
 
 # ---------- 路径相关常量 ----------
-MODS_RELATIVE_PATH = r"hollow_knight_Data\Managed\Mods"
-MANAGED_RELATIVE_PATH = r"hollow_knight_Data\Managed"
 CONFIG_FILE = "config.json"
 DOWNLOAD_DIR_NAME = "downloads"
 

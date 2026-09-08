@@ -9,7 +9,7 @@ import platform
 import sys
 
 from config import (
-    CONFIG_FILE, MODS_RELATIVE_PATH,
+    CONFIG_FILE,
     API_ZIP_MAP,
     STEAM_APPID, DOWNLOAD_DIR_NAME,
     get_base_dir,
@@ -30,11 +30,31 @@ def get_download_dir():
 
 
 def get_save_folder():
-    """获取游戏存档文件夹路径"""
+    """获取游戏存档文件夹路径（按平台分支）"""
     s = get_system_type()
     if s == "Windows":
         return os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\Team Cherry\Hollow Knight")
+    if s == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/unity.Team Cherry.Hollow Knight")
+    if s == "Linux":
+        return os.path.expanduser("~/.config/unity3d/Team Cherry/Hollow Knight")
     return None
+
+
+def open_path(path):
+    """跨平台打开文件/文件夹/URL（Windows 用 os.startfile，macOS 用 open，Linux 用 xdg-open）"""
+    import subprocess
+    s = get_system_type()
+    try:
+        if s == "Windows":
+            os.startfile(path)
+        elif s == "Darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        return False
 
 
 # ============================================================
@@ -132,9 +152,20 @@ def get_asset_path(*names):
     return os.path.join(base, "assets", *names)
 
 
+def get_managed_dir(game_path):
+    """
+    获取游戏 Managed 目录（按平台分支）。
+    - Windows / Linux：<root>/hollow_knight_Data/Managed
+    - macOS：<root>/Hollow Knight.app/Contents/Resources/Data/Managed
+    """
+    if get_system_type() == "Darwin":
+        return os.path.join(game_path, "Hollow Knight.app", "Contents", "Resources", "Data", "Managed")
+    return os.path.join(game_path, "hollow_knight_Data", "Managed")
+
+
 def get_mods_dir(game_path):
-    """获取Mods目录路径"""
-    return os.path.join(game_path, MODS_RELATIVE_PATH)
+    """获取 Mods 目录路径（按平台分支）"""
+    return os.path.join(get_managed_dir(game_path), "Mods")
 
 
 def get_disabled_dir(game_path):
@@ -154,12 +185,27 @@ def get_metadata_path(game_path):
 
 
 def get_game_exe_path(game_path):
-    """获取游戏可执行文件路径"""
+    """
+    获取游戏可执行文件路径。
+    - Windows：<root>/hollow_knight.exe
+    - macOS：<root>/Hollow Knight.app（用 open 启动）
+    - Linux：<root>/hollow_knight.x86_64（或 .x86）
+    找不到返回 None。
+    """
     system = get_system_type()
     if system == "Windows":
         exe = os.path.join(game_path, "hollow_knight.exe")
         if os.path.isfile(exe):
             return exe
+    elif system == "Darwin":
+        app = os.path.join(game_path, "Hollow Knight.app")
+        if os.path.isdir(app):
+            return app
+    elif system == "Linux":
+        for name in ("hollow_knight.x86_64", "hollow_knight.x86"):
+            p = os.path.join(game_path, name)
+            if os.path.isfile(p):
+                return p
     return None
 
 
@@ -168,29 +214,50 @@ def get_game_exe_path(game_path):
 # ============================================================
 def get_steam_app_install_dir(appid=STEAM_APPID):
     """
-    返回 Steam 库中指定 AppID 的官方安装目录（跨所有 Steam 库查找）。
+    返回 Steam 库中指定 AppID 的官方安装目录（跨所有 Steam 库查找，跨平台）。
 
-    通过注册表定位 Steam 根目录，解析 libraryfolders.vdf 获取全部库路径，
+    通过 Steam 根目录定位 libraryfolders.vdf 获取全部库路径，
     再读取 appmanifest_<appid>.acf 中的 installdir 拼出实际安装位置。
     找不到返回 None。
     """
     import re
-    import winreg
 
-    # 1. 定位 Steam 根目录（注册表优先，常见默认路径兜底）
+    system = get_system_type()
+
+    # 1. 定位 Steam 根目录（按平台分支）
     steam_root = None
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam") as key:
-            steam_root = winreg.QueryValueEx(key, "SteamPath")[0]
-    except Exception:
-        pass
-    if not steam_root or not os.path.isdir(steam_root):
-        pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-        pf = os.environ.get("ProgramFiles", "C:\\Program Files")
-        for cand in [os.path.join(pf86, "Steam"), os.path.join(pf, "Steam")]:
+    if system == "Windows":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam") as key:
+                steam_root = winreg.QueryValueEx(key, "SteamPath")[0]
+        except Exception:
+            pass
+        if not steam_root or not os.path.isdir(steam_root):
+            pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+            pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+            for cand in [os.path.join(pf86, "Steam"), os.path.join(pf, "Steam")]:
+                if os.path.isdir(cand):
+                    steam_root = cand
+                    break
+    else:
+        home = os.path.expanduser("~")
+        if system == "Darwin":
+            candidates = [
+                os.path.join(home, "Library", "Application Support", "Steam"),
+                os.path.join(home, ".steam", "steam"),
+            ]
+        else:  # Linux
+            candidates = [
+                os.path.join(home, ".steam", "steam"),
+                os.path.join(home, ".local", "share", "Steam"),
+                os.path.join(home, ".steam"),
+            ]
+        for cand in candidates:
             if os.path.isdir(cand):
                 steam_root = cand
                 break
+
     if not steam_root or not os.path.isdir(steam_root):
         return None
 
@@ -337,6 +404,48 @@ def find_hollow_knight_exe():
                 seen.add(key)
                 unique_results.append((exe, path))
         results = unique_results
+
+    elif system == "Darwin":
+        # macOS：游戏在 .app 包内；游戏根目录为包含 Hollow Knight.app 的文件夹
+        home = os.path.expanduser("~")
+        mac_candidates = [
+            os.path.join(home, "Library", "Application Support", "Steam",
+                         "steamapps", "common", "Hollow Knight"),
+            os.path.join(home, ".steam", "steam", "steamapps", "common", "Hollow Knight"),
+            "/Applications/Hollow Knight.app",
+        ]
+        seen = set()
+        for c in mac_candidates:
+            if c.endswith(".app"):
+                app = c
+                root = os.path.dirname(c)
+            else:
+                root = c
+                app = os.path.join(root, "Hollow Knight.app")
+            if os.path.isdir(app):
+                key = os.path.normcase(normalize_path(root))
+                if key not in seen:
+                    seen.add(key)
+                    results.append((app, normalize_path(root)))
+
+    elif system == "Linux":
+        # Linux：可执行文件为 hollow_knight.x86_64 / .x86
+        home = os.path.expanduser("~")
+        linux_candidates = [
+            os.path.join(home, ".steam", "steam", "steamapps", "common", "Hollow Knight"),
+            os.path.join(home, ".local", "share", "Steam", "steamapps", "common", "Hollow Knight"),
+            os.path.join(home, ".steam", "steamapps", "common", "Hollow Knight"),
+        ]
+        seen = set()
+        for root in linux_candidates:
+            for name in ("hollow_knight.x86_64", "hollow_knight.x86"):
+                exe = os.path.join(root, name)
+                if os.path.isfile(exe):
+                    key = os.path.normcase(normalize_path(root))
+                    if key not in seen:
+                        seen.add(key)
+                        results.append((exe, normalize_path(root)))
+                    break
 
     return results
 
