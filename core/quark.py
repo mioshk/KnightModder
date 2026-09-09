@@ -627,15 +627,44 @@ class QuarkClient:
             f"分享内容共 {len(files)} 个文件，本次需下载 {len(targets)} 个"
             f"（{self._fmt_size(total_size)}）", "info")
 
-        # ---------- 云盘转存：直接放进「KnightModder」，不套子目录，且不再删除 ----------
-        # 全部文件平铺在网盘 KnightModder/ 下；下载完成后保留，由用户自行清理。
-        # 因为目录被反复复用，不能简单"按文件名取第一个"来定位文件（重复转存时
-        # 可能取到旧的同名文件），下面统一用「转存前后的 fid 差集」精确定位本次新增。
+        # ---------- 云盘转存：直接放进「KnightModder」，不套子目录 ----------
+        # 全部文件平铺在网盘 KnightModder/ 下；更新时先清掉该 Mod 的旧文件，
+        # 避免重复转存导致 (1)(2)(3) 自动改名堆积。
         target_fid = self._ensure_cloud_root()
         owner_key = re.sub(r"[\s\-_]+", "", self._sanitize_part(
             remote_dir_name or pwd_id or "")).lower()
 
-        # 转存前快照：目录里已有的文件
+        # 转存前清理：删掉云端属于该 Mod 的旧文件（防止 (1)(2)(3) 堆积）
+        if owner_key:
+            before_index = self._list_file_index(target_fid)
+            old_fids = []
+            for fname, items in before_index.items():
+                stem = os.path.splitext(fname)[0]
+                fkey = re.sub(r"[\s\-_]+", "", stem).lower()
+                if owner_key and (fkey.startswith(owner_key) or owner_key in fkey):
+                    old_fids.extend(i["fid"] for i in items)
+            if old_fids:
+                self.status_callback(f"正在清理云端旧文件（{len(old_fids)} 个）...", "info")
+                try:
+                    r = self.session.post(
+                        "https://drive-pc.quark.cn/1/clouddrive/file/delete",
+                        params={
+                            "pr": "ucpro", "fr": "pc", "uc_param_str": "",
+                            "__dt": _random_dt(), "__t": _timestamp13(),
+                        },
+                        json={"action_type": 2, "filelist": old_fids, "exclude_fids": []},
+                        headers=self.base_headers,
+                        timeout=self.timeout,
+                    )
+                    data = r.json()
+                    tid = (data.get("data") or {}).get("task_id")
+                    if tid:
+                        self.poll_task(tid, delay=0.6, max_retry=20)
+                    self.status_callback("云端旧文件已清理", "success")
+                except Exception as e:  # noqa: BLE001
+                    self.status_callback(f"云端旧文件清理失败（继续转存）：{e}", "warn")
+
+        # 转存前快照：目录里已有的文件（清理后重新取，确保准确）
         before_index = self._list_file_index(target_fid)
         before_fids = {i["fid"] for items in before_index.values() for i in items}
 

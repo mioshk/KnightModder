@@ -98,12 +98,14 @@ def plan_install(zip_path: str, mod_name: str) -> Tuple[Optional[str], str]:
     :return: (source_top_dir, dest_dir_name)
         source_top_dir: zip 内唯一顶层目录名；若 zip 顶层是散装结构则为 None，
                         此时安装源是整个解压目录
-        dest_dir_name : Mods 下应使用的目录名
+        dest_dir_name : Mods 下应使用的目录名（始终以 XML <Name> 为准，
+                        不再盲信 zip 内部目录名——很多 Mod 打包时保留了基座
+                        如 ItemChanger/ 的原始目录结构）
     """
     top_dirs, top_files = analyze_zip(zip_path)
     if len(top_dirs) == 1 and not top_files:
-        # 单一顶层目录且无散文件 -> 该目录就是 Mod 本体，保留原名
-        return top_dirs[0], top_dirs[0]
+        # 单一顶层目录且无散文件 -> 源指向该目录，但目标文件夹用 XML 名称
+        return top_dirs[0], sanitize_mod_name(mod_name)
     # 散装/多顶层条目 -> 套一个以 Mod 名命名的文件夹
     return None, sanitize_mod_name(mod_name)
 
@@ -119,6 +121,9 @@ def merge_tree(src_dir: str, dst_dir: str) -> None:
     """
     os.makedirs(dst_dir, exist_ok=True)
     for entry in os.listdir(src_dir):
+        # macOS 打 zip 时会在包里塞一个 __MACOSX 垃圾目录，绝不能装进游戏 Mods
+        if entry == "__MACOSX":
+            continue
         s = os.path.join(src_dir, entry)
         d = os.path.join(dst_dir, entry)
         if os.path.isdir(s):

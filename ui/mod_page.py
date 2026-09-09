@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
     QSignalBlocker,
+    QFileSystemWatcher,
     QSize,
     QEvent,
     QThread,
@@ -239,12 +240,13 @@ class DepItem(QFrame):
 # ============================================================
 
 class ModListItemWidget(QWidget):
-    def __init__(self, mod_name, display_name, enabled=True, parent=None, list_item=None):
+    def __init__(self, mod_name, display_name, enabled=True, has_update=False, parent=None, list_item=None):
         super().__init__(parent)
 
         self.mod_name = mod_name
         self.display_name = display_name
         self.enabled = enabled
+        self.has_update = has_update
         self.is_selected = False
         self.list_item = list_item
         self.list_widget = parent
@@ -286,6 +288,13 @@ class ModListItemWidget(QWidget):
         bg_layout.addWidget(self.name_label)
 
         bg_layout.addStretch()
+
+        # 「待更新」按钮：本地 Mod 有可用更新时显示（点击切到在线页去更新）
+        self.action_btn = QPushButton()
+        self.action_btn.setFixedSize(64, 28)
+        self.action_btn.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
+        self._update_action_btn()
+        bg_layout.addWidget(self.action_btn)
 
         self.status_label = QLabel("已启用" if enabled else "已禁用")
         self.status_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
@@ -341,8 +350,17 @@ class ModListItemWidget(QWidget):
                 }
             """)
 
-    def _update_status_dot(self, enabled):
-        color = "#34c759" if enabled else "#666666"
+    def _update_status_dot(self, enabled=None):
+        if enabled is None:
+            enabled = self.enabled
+        else:
+            self.enabled = enabled
+        if self.has_update:
+            color = "#ff9500"
+        elif enabled:
+            color = "#34c759"
+        else:
+            color = "#666666"
         self.status_dot.setStyleSheet(f"""
             QLabel {{
                 background-color: {color};
@@ -354,6 +372,34 @@ class ModListItemWidget(QWidget):
                 border: none;
             }}
         """)
+
+    def _update_action_btn(self):
+        """本地 Mod 有可用更新时显示「待更新」按钮（点击切到在线页更新）。"""
+        if self.has_update:
+            self.action_btn.setText("待更新")
+            self.action_btn.setVisible(True)
+            self.action_btn.setCursor(Qt.PointingHandCursor)
+            self.action_btn.setEnabled(True)
+            self.action_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #ff9500;
+                    color: white;
+                    border: none;
+                    border-radius: 14px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background-color: #e68a00;
+                }
+                QPushButton:pressed {
+                    background-color: #cc7a00;
+                }
+            """)
+        else:
+            self.action_btn.setVisible(False)
+            self.action_btn.setText("")
 
     def set_selected(self, selected):
         # 状态未变直接返回：拖拽/高频刷新会逐行调用，
@@ -894,6 +940,7 @@ class ModDetailPanel(QWidget):
         dependencies=None,
         integrations=None,
         is_online_page=False,
+        local_version="",
     ):
         self.title_en.setStyleSheet("""
             QLabel {
@@ -905,8 +952,12 @@ class ModDetailPanel(QWidget):
         """)
         self.title_en.setText(f"{mod_name}（{chinese_name}）" if chinese_name else mod_name)
 
+        # 版本徽章：待更新时显示「v旧版本 → v新版本」，其它情况只显示当前版本
         if version:
-            self.version_badge.setText(f"v{version}")
+            if has_update and local_version:
+                self.version_badge.setText(f"v{local_version} → v{version}")
+            else:
+                self.version_badge.setText(f"v{version}")
             self.version_badge.setVisible(True)
         else:
             self.version_badge.setText("")
@@ -982,7 +1033,7 @@ class ModDetailPanel(QWidget):
             is_online_page=False,
         )
 
-    def set_online_mod_info(self, mod_name, is_installed, has_update, mod_info=None):
+    def set_online_mod_info(self, mod_name, is_installed, has_update, mod_info=None, local_version=""):
         chinese_name = version = desc_cn = desc_en = ""
         deps = integ = []
         if mod_info:
@@ -1004,6 +1055,7 @@ class ModDetailPanel(QWidget):
             dependencies=deps,
             integrations=integ,
             is_online_page=True,
+            local_version=local_version,
         )
 
 
@@ -1176,6 +1228,7 @@ class ModPage(QWidget):
         self._current_widget = None
         self._current_row = -1
         self._rendered = False  # 首次渲染标记：切换标签页时避免重复重建列表
+        self._game_path = ""    # 当前游戏路径（文件监听用，刷新时同步）
         # 自定义拖拽区间选择状态（替代 Qt 自带框选，修复自绘行+自动滚动下漏选/丢尾行）
         self._sel_press_row = -1          # 按下时所在行（-1 表示未在拖拽选择中）
         self._sel_press_pos = QPoint()    # 按下位置（viewport 坐标）
@@ -1192,6 +1245,26 @@ class ModPage(QWidget):
         self._sel_base = set()            # 拖拽开始前已选中的行集合（Ctrl 加选时作基线）
         self._sel_autoscroll = None       # 拖拽到边缘时的自动滚动 QTimer
         self._setup_ui()
+
+        # 文件系统监听：Mods 文件夹（含 Disabled 子目录）变动时自动刷新本地列表，
+        # 玩家无需手动点刷新。目录变化事件较密集（安装/增删会连续触发），用 400ms
+        # 防抖合并为一次刷新。
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.directoryChanged.connect(self._on_mods_dir_changed)
+        self._fs_watch_timer = QTimer(self)
+        self._fs_watch_timer.setSingleShot(True)
+        self._fs_watch_timer.setInterval(400)
+        self._fs_watch_timer.timeout.connect(
+            lambda: self.refresh_mod_list(self._game_path))
+
+        # 兜底轮询：QFileSystemWatcher 在个别 Windows 环境/特定删除操作下可能漏事件，
+        # 这里每秒比对一次 Mods 目录快照（文件夹名+修改时间），有变化就刷新。
+        # 不依赖 watcher，保证「文件夹变动必刷新」一定成立。
+        self._fs_poll_timer = QTimer(self)
+        self._fs_poll_timer.setInterval(1000)
+        self._fs_poll_timer.timeout.connect(self._poll_mods_dir)
+        self._mods_sig = None
+        self._fs_poll_timer.start()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1284,7 +1357,7 @@ class ModPage(QWidget):
 
         self.filter_combo = QComboBox()
         with QSignalBlocker(self.filter_combo):
-            self.filter_combo.addItems(["全部模组", "已启用", "已禁用"])
+            self.filter_combo.addItems(["全部模组", "已启用", "已禁用", "待更新"])
         self.filter_combo.setFixedWidth(120)
         self.filter_combo.setStyleSheet("""
             QComboBox {
@@ -1919,6 +1992,8 @@ class ModPage(QWidget):
 
     def refresh_mod_list(self, game_path):
         try:
+            self._game_path = game_path or ""
+            self._update_fs_watch()  # 同步监听的 Mods 目录（含 Disabled）
             selected_mod = self._current_mod
             saved_filter_index = self.filter_combo.currentIndex()
             saved_search_text = self.search_input.text()
@@ -2002,6 +2077,16 @@ class ModPage(QWidget):
 
             resolver = self.parent.resolver if self.parent and hasattr(self.parent, 'resolver') else None
 
+            # 建立「归一化名 -> 在线 Mod」映射，用于判断本地 Mod 是否有更新
+            online_by_norm = {}
+            if resolver and hasattr(resolver, 'mod_data'):
+                for info in resolver.mod_data:
+                    nm = info.get('name', '')
+                    if nm:
+                        online_by_norm[normalize_name(nm)] = info
+
+            from core.online_install import local_package_sha
+
             # 批量插入期间禁用重绘/重排，结束后一次性布局（大幅提速）
             self.mod_list.setUpdatesEnabled(False)
             for mod_name, enabled in found_mods:
@@ -2011,20 +2096,37 @@ class ModPage(QWidget):
 
                 display_name = f"{mod_name}（{chinese_name}）" if chinese_name else mod_name
 
+                # 是否有可用更新：本地安装包 sha 与在线发布 sha 不一致
+                has_update = False
+                online_info = online_by_norm.get(normalize_name(mod_name))
+                if online_info:
+                    online_sha = (online_info.get('sha256') or '').strip().upper()
+                    if online_sha:
+                        local_sha = local_package_sha(game_path, mod_name)
+                        # 无 metadata（旧版装的）无法判定版本，不当作有更新，避免误报
+                        has_update = bool(local_sha) and local_sha != online_sha
+
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, mod_name)
                 item.setData(Qt.UserRole + 1, enabled)
+                item.setData(Qt.UserRole + 2, has_update)
 
                 widget = ModListItemWidget(
                     mod_name=mod_name,
                     display_name=display_name,
                     enabled=enabled,
+                    has_update=has_update,
                     parent=self.mod_list,
                     list_item=item
                 )
                 item.setSizeHint(widget.sizeHint())
                 self.mod_list.addItem(item)
                 self.mod_list.setItemWidget(item, widget)
+                # 本地 Mod 有更新：点「待更新」切到在线页选中该 Mod 去升级
+                if has_update:
+                    widget.action_btn.clicked.connect(
+                        lambda checked=False, mn=mod_name: self._on_local_update_clicked(mn)
+                    )
 
             self._update_count()
             self.search_input.setText(saved_search_text)
@@ -2071,6 +2173,8 @@ class ModPage(QWidget):
                     visible = False
                 elif filter_index == 2 and widget.enabled:
                     visible = False
+                elif filter_index == 3 and not widget.has_update:
+                    visible = False
                 item.setHidden(not visible)
 
         visible_count = sum(1 for i in range(self.mod_list.count()) if not self.mod_list.item(i).isHidden())
@@ -2080,6 +2184,85 @@ class ModPage(QWidget):
     def _manual_refresh(self):
         if self.parent and hasattr(self.parent, 'game_path'):
             self.refresh_mod_list(self.parent.game_path)
+
+    def _update_fs_watch(self):
+        """根据当前 game_path 重新设置要监听的 Mods 目录。
+
+        只监听 Mods 根目录，不监听 Disabled 子目录：启用/禁用 mod 是文件夹在
+        Mods 与 Disabled 之间移动，Mods 根目录的变动已能覆盖（禁用=从 Mods 移走、
+        启用=进入 Mods）；另外 Disabled 在某些环境 ACL 受限，QFileSystemWatcher
+        对其取监视句柄会报「FindNextChangeNotification failed ... 拒绝访问」。
+        Disabled 内的直接增删由兜底轮询覆盖，无需 watcher。
+        """
+        if self._fs_watcher is None:
+            return
+        watched = set(self._fs_watcher.directories())
+        if not self._game_path:
+            for p in watched:
+                self._fs_watcher.removePath(p)
+            return
+        mods_dir = get_mods_dir(self._game_path)
+        want = {mods_dir} if os.path.isdir(mods_dir) else set()
+        # 只增删差异项，避免对同一个目录反复 remove/add 导致 watch 丢失
+        for p in watched - want:
+            self._fs_watcher.removePath(p)
+        for p in want - watched:
+            self._fs_watcher.addPath(p)
+
+    def _compute_mods_signature(self, game_path):
+        """计算 Mods 目录快照签名（文件夹名 + 修改时间），用于轮询比对。"""
+        mods_dir = get_mods_dir(game_path)
+        parts = []
+        for base in (mods_dir, os.path.join(mods_dir, "Disabled")):
+            try:
+                names = sorted(e.name for e in os.scandir(base) if e.is_dir())
+            except OSError:
+                names = []
+            for n in names:
+                try:
+                    m = int(os.path.getmtime(os.path.join(base, n)))
+                except OSError:
+                    m = 0
+                parts.append(f"{n}:{m}")
+        return tuple(parts)
+
+    def _poll_mods_dir(self):
+        """兜底轮询：每秒比对 Mods 目录快照，有变化就刷新列表。"""
+        gp = self.parent.game_path if (self.parent
+                                       and hasattr(self.parent, 'game_path')) else None
+        if not gp:
+            return
+        try:
+            sig = self._compute_mods_signature(gp)
+        except Exception:
+            return
+        if sig != self._mods_sig:
+            self._mods_sig = sig
+            self.refresh_mod_list(gp)
+
+    def _on_mods_dir_changed(self, path):
+        # 目录变动（增删 mod / 启用禁用切换 / metadata 写入）触发防抖刷新
+        if self._fs_watch_timer:
+            self._fs_watch_timer.start()
+
+    def _on_local_update_clicked(self, mod_name):
+        """本地 Mod 有更新：点「待更新」切到在线页并选中该 Mod 去升级。"""
+        mw = self.parent
+        if not (mw and hasattr(mw, '_switch_tab')):
+            return
+        mw._switch_tab(2)  # 在线模组页
+        page = mw.page_online
+
+        def _select():
+            try:
+                if not getattr(page, '_rendered', False):
+                    page.refresh_mod_list(mw.game_path or '')
+                page.select_mod_by_name(mod_name)
+            except Exception:
+                pass
+
+        # 等在线页渲染完成（_switch_tab 内用 QTimer(50) 触发渲染）后再选中
+        QTimer.singleShot(200, _select)
 
     def _clear_selection(self):
         if self.mod_list.selectedItems():
@@ -2117,12 +2300,12 @@ class ModPage(QWidget):
                         enabled = widget.enabled
                     break
 
+            # 本地已装模组的版本来自 .metadata.json（不再依赖 ModLog）
             version_from_modlog = ""
-            local_mods = parse_modlog()
-            normalized = normalize_name(mod_name)
-            local_info = local_mods.get(normalized)
-            if local_info:
-                version_from_modlog = local_info[1]
+            game_path = getattr(self.parent, 'game_path', '') if self.parent else ''
+            if game_path:
+                from core.installer import get_mod_version_from_metadata
+                version_from_modlog = get_mod_version_from_metadata(game_path, mod_name) or ""
 
             mod_info = None
             if self.parent and hasattr(self.parent, 'resolver'):
@@ -2781,6 +2964,18 @@ class OnlineModPage(QWidget):
         self._current_mod = mod_name
         self._show_mod_detail(mod_name)
 
+    def select_mod_by_name(self, mod_name):
+        """按（归一化）名称在在线列表中选中并展开某 Mod 的详情，找不到返回 False。"""
+        target = normalize_name(mod_name)
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            mn = item.data(Qt.UserRole)
+            if mn and normalize_name(mn) == target:
+                self.mod_list.setCurrentRow(i)
+                self._on_item_clicked(item)
+                return True
+        return False
+
     def _show_mod_detail(self, mod_name):
         try:
             is_installed = has_update = False
@@ -2797,12 +2992,22 @@ class OnlineModPage(QWidget):
                 if hasattr(resolver, 'mod_data_by_name'):
                     mod_info = resolver.mod_data_by_name.get(mod_name)
 
+            # 在线页读取本地已安装版本（用于显示 v旧→v新 格式）。
+            # 来源改为 .metadata.json 的 version 字段，不再依赖 ModLog。
+            local_version = ""
+            if is_installed:
+                game_path = getattr(self.parent, 'game_path', '') if self.parent else ''
+                if game_path:
+                    from core.installer import get_mod_version_from_metadata
+                    local_version = get_mod_version_from_metadata(game_path, mod_name) or ""
+
             self.detail_scroll.detail_panel._dep_checker = lambda n: self._is_mod_installed(n)
             self.detail_scroll.detail_panel.set_online_mod_info(
                 mod_name=mod_name,
                 is_installed=is_installed,
                 has_update=has_update,
                 mod_info=mod_info,
+                local_version=local_version,
             )
 
         except RuntimeError:
@@ -2872,6 +3077,7 @@ class OnlineModPage(QWidget):
 
         resolver = getattr(parent, 'resolver', None) if parent else None
         if not resolver or not hasattr(resolver, 'mod_data_by_name') or mod_name not in resolver.mod_data_by_name:
+            QMessageBox.warning(self, "无法下载", f"未找到模组「{mod_name}」的下载信息，请确认在线列表已加载完成。")
             return
 
         from utils.common import load_app_setting, load_quark_cookie

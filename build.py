@@ -40,6 +40,10 @@ def main():
         "--windowed",
         "--noconfirm",
     ]
+    # Windows：嵌入应用图标（macOS / Linux 走各自平台的图标机制，此处跳过）
+    icon = os.path.join(ROOT, "assets", "icon.ico")
+    if sys.platform == "win32" and os.path.isfile(icon):
+        cmd.append(f"--icon={icon}")
     for imp in HIDDEN_IMPORTS:
         cmd.append(f"--hidden-import={imp}")
     # 收集 QtWebEngine 运行所需的二进制与资源（进程助手、翻译、资源等）

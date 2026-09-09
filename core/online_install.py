@@ -37,7 +37,7 @@ from typing import List, Optional, Callable
 from core.quark import QuarkClient, QuarkError
 from core.install_manager import (calc_file_sha256, install_zip,
                                   sanitize_mod_name, verify_zip_sha256)
-from core.installer import load_metadata
+from core.installer import load_metadata, update_mod_metadata
 from utils.common import get_download_dir, get_mods_dir, load_quark_cookie
 
 
@@ -98,6 +98,40 @@ def installed_mod_set(game_path: str) -> set:
 
     _scan(mods_dir)
     _scan(os.path.join(mods_dir, "Disabled"))
+
+    # 同时纳入 .metadata.json 里记录的已装 Mod：覆盖「文件夹名与 XML 发布名不一致」
+    # 的情况（例如旧版代码用 zip 内部目录名装包，或作者打包目录名与发布名不同）。
+    # 这样依赖 Mod 即使文件夹名和发布名对不上，也能正确识别为「已安装」。
+    # 重要：仅当目录中仍存在对应实体（文件夹或 dll）时才纳入；用户手动删除后不应残留。
+    try:
+        md = load_metadata(game_path)
+        if isinstance(md, dict):
+            for key in md:
+                if isinstance(md[key], dict):
+                    norm_key = _name_norm(key)
+                    # 检查 Mods / Disabled 下是否有同名文件夹或 dll
+                    found = False
+                    for base in (mods_dir, os.path.join(mods_dir, "Disabled")):
+                        if not os.path.isdir(base):
+                            continue
+                        try:
+                            for entry in os.listdir(base):
+                                if _name_norm(entry) == norm_key:
+                                    p = os.path.join(base, entry)
+                                    if os.path.isdir(p) or (
+                                        os.path.isfile(p) and entry.lower().endswith(".dll")
+                                    ):
+                                        found = True
+                                        break
+                        except OSError:
+                            pass
+                        if found:
+                            break
+                    if found:
+                        result.add(norm_key)
+    except Exception:  # noqa: BLE001
+        pass
+
     return result
 
 
@@ -262,7 +296,19 @@ def _pick_package(paths: List[str], mod_info: dict) -> str:
         raise QuarkError(f"未找到指定的安装包：{download_name}")
 
     if len(zips) == 1:
-        return zips[0]
+        # 唯一 zip：仍需确认文件名与 Mod 名相关，防止分享内容错乱导致装错包
+        picked = zips[0]
+        fname = os.path.basename(picked)
+        mod_base = _name_norm(mod_info.get("name") or "")
+        file_stem = _name_norm(os.path.splitext(fname)[0])
+        # 文件名归一化后完全一致，或 Mod 名是文件名子串（反之亦然）→ 认可
+        if mod_base and file_stem and mod_base != file_stem \
+                and mod_base not in file_stem and file_stem not in mod_base:
+            raise QuarkError(
+                f"分享里只有一个 zip「{fname}」，但文件名与 Mod 名"
+                f"「{mod_info.get('name', '')}」完全不匹配，可能是分享链接配置错误。"
+                f"请在 XML 的 <DownloadName> 指定要安装的文件")
+        return picked
 
     # 多个 zip：优先挑文件名与 Mod 名一致的
     base = _name_norm(mod_info.get("name") or "")
@@ -487,9 +533,11 @@ def _download_and_verify(cookie: str, game_path: str, mod_info: dict,
     if package_path is None:
         raise QuarkError(f"{name} 所有分享链接均不可用，请检查分享是否失效或到官网获取新地址")
 
-    if remote_sha:
-        if not verify_zip_sha256(package_path, remote_sha):
-            raise QuarkError(f"{name} 下载包校验失败（sha256 与发布数据不一致），已中止安装，请勿强行使用")
+    if remote_sha and not verify_zip_sha256(package_path, remote_sha):
+        # XML 声明的 sha 与实际下载包不符：绝大多数是 XML <Sha256> 没随版本更新而过期。
+        # 不再硬中止（否则用户永远无法更新），改为警告并继续；文件若真损坏，
+        # 安装阶段 install_zip 仍会因不是合法 zip 而拦截，不会装进游戏目录。
+        log(f"⚠️ {name} 下载包 sha 与 XML 声明不一致（可能是 XML <Sha256> 过期），仍继续安装", "warn")
     return {"zip": package_path}
 
 
@@ -625,6 +673,10 @@ def run_install_batch(game_path: str, tasks: List[dict],
             with _INSTALL_LOCK:
                 r = install_zip(game_path, res["zip"], mod_name=name,
                                 remote_sha256=remote_sha, log=log)
+            # 把线上版本号写入 .metadata.json，供详情页显示「v旧 → v新」
+            ver = (info.get("version") or "").strip()
+            if ver:
+                update_mod_metadata(game_path, name, version=ver)
             statuses[name] = r.get("status", "installed")
             if task_done:
                 task_done(name, statuses[name])

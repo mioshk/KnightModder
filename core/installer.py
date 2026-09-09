@@ -4,6 +4,7 @@
 包含API安装、原版还原、Mod安装、游戏启动、模组启用/禁用/删除、依赖解析等功能
 """
 import os
+import re
 import json
 import shutil
 import subprocess
@@ -136,8 +137,10 @@ def get_mod_version_from_metadata(game_path, mod_name):
     :return: 版本号字符串，不存在则返回None
     """
     metadata = load_metadata(game_path)
-    if mod_name in metadata:
-        return metadata[mod_name].get("version")
+    target = re.sub(r"[ \-_\.]", "", (mod_name or "").lower())
+    for key, info in metadata.items():
+        if re.sub(r"[ \-_\.]", "", (key or "").lower()) == target and isinstance(info, dict):
+            return info.get("version")
     return None
 
 
