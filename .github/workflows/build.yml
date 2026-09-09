@@ -14,10 +14,13 @@ jobs:
         include:
           - os: windows-latest
             artifact: KnightModder-Windows
+            suffix: windows
           - os: macos-latest
             artifact: KnightModder-macOS
+            suffix: macos
           - os: ubuntu-latest
             artifact: KnightModder-Linux
+            suffix: linux
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -49,36 +52,29 @@ jobs:
           sips -z 1024 1024 assets/icon.png --out assets/icon.iconset/icon_512x512@2x.png
           iconutil -c icns assets/icon.iconset -o assets/icon.icns
 
-      - name: Read version from config.py
-        id: version
-        run: |
-          VERSION=$(python -c "import re; f=open('config.py'); t=f.read(); f.close(); m=re.search(r'APP_VERSION\s*=\s*[\"\'']([^\"\'']+)[\"\'']', t); print(m.group(1) if m else '0.0.0')")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Read version: $VERSION"
-        shell: bash
-
       - name: Build single-file executable (PyInstaller)
         run: pyinstaller --noconfirm main.spec
 
-      - name: Rename artifact by platform (Windows)
+      - name: Rename artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ver = $env:GITHUB_REF_NAME -replace '^v',''
           $exe = Get-Item dist\KnightModder* | Select-Object -First 1
           $ext = $exe.Extension
-          Rename-Item $exe.FullName -NewName "KnightModder-v${{ steps.version.outputs.version }}-windows$ext"
+          Rename-Item $exe.FullName -NewName "KnightModder-v$ver-${{ matrix.suffix }}$ext"
 
-      - name: Rename artifact by platform (macOS / Linux)
+      - name: Rename artifact (macOS / Linux)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          PLATFORM="${{ runner.os }}"  # macOS or Linux
+          VERSION="${GITHUB_REF_NAME#v}"
           FILE=$(ls dist/KnightModder* | head -1)
           EXT="${FILE##*.}"
           if [ "$EXT" != "$FILE" ]; then
-            mv "$FILE" "dist/KnightModder-v${{ steps.version.outputs.version }}-${PLATFORM,,}.$EXT"
+            mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}.${EXT}"
           else
-            mv "$FILE" "dist/KnightModder-v${{ steps.version.outputs.version }}-${PLATFORM,,}"
+            mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}"
           fi
 
       - name: Upload artifact
