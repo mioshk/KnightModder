@@ -54,9 +54,9 @@ API_ZIP_MAP = {
 
 # ---------- Modding API 夸克网盘分享链接（按平台，参考 Lumafly 直接从网盘安装） ----------
 API_QUARK_LINKS = {
-    "Windows": "https://pan.quark.cn/s/34e4c3074b81",
-    "Darwin":  "https://pan.quark.cn/s/b3725b4ea36c",
-    "Linux":   "https://pan.quark.cn/s/f1c7df8142fb",
+    "Windows": "https://pan.quark.cn/s/21185cedf1e2",
+    "Darwin":  "https://pan.quark.cn/s/4630364d1d19",
+    "Linux":   "https://pan.quark.cn/s/51df7de12633",
 }
 
 # ---------- 暗黑极简配色方案 ----------

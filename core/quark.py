@@ -267,15 +267,17 @@ class QuarkClient:
                 return is_owner, file_list
             page += 1
 
-    def walk_share(self, pwd_id: str, stoken: str, pdir_fid: str = "0", rel_path: str = ""):
+    def walk_share(self, pwd_id: str, stoken: str, pdir_fid: str = "0", rel_path: str = "",
+                   is_owner: int = 0):
         """
         递归遍历分享文件树。
-        返回 (files, folders_map)
+        返回 (files, folders_map, is_owner)
         files: [{fid, file_name, size, rel_path, share_fid_token, pdir_fid}]
         folders_map: {fid: {file_name, pdir_fid}} 用于还原目录结构
+        is_owner: 该分享是否为当前登录账号自己所创建（夸克禁止转存自己的分享）
         """
         files, folders_map = [], {}
-        _, item_list = self.get_detail(pwd_id, stoken, pdir_fid=pdir_fid)
+        is_owner, item_list = self.get_detail(pwd_id, stoken, pdir_fid=pdir_fid)
         for item in item_list:
             name = item["file_name"]
             if item.get("dir"):
@@ -284,9 +286,10 @@ class QuarkClient:
                     "pdir_fid": item["pdir_fid"],
                 }
                 sub_rel = os.path.join(rel_path, name) if rel_path else name
-                sub_files, sub_map = self.walk_share(pwd_id, stoken,
+                sub_files, sub_map, _ = self.walk_share(pwd_id, stoken,
                                                      pdir_fid=item["fid"],
-                                                     rel_path=sub_rel)
+                                                     rel_path=sub_rel,
+                                                     is_owner=is_owner)
                 files.extend(sub_files)
                 folders_map.update(sub_map)
             else:
@@ -298,7 +301,7 @@ class QuarkClient:
                     "share_fid_token": item.get("share_fid_token"),
                     "pdir_fid": item.get("pdir_fid"),
                 })
-        return files, folders_map
+        return files, folders_map, is_owner
 
     # ---------------- 自己网盘：建目录 / 列表 / 转存 ----------------
 
@@ -388,6 +391,30 @@ class QuarkClient:
             fid = self.create_dir(self.CLOUD_ROOT_NAME, pdir_fid="0")
         self._cloud_root_cache[self.CLOUD_ROOT_NAME] = fid
         return fid
+
+    def _find_own_file(self, filename: str, size: int):
+        """在自己网盘里按文件名+大小查找文件；命中返回真实 cloud fid，未命中返回 None。
+
+        用于"分享链接本身就是自己网盘里的文件"的场景：检测到后直接拿真实 fid
+        下载，跳过转存（省一次云端复制，也避免重复堆积文件）。
+        """
+        api = "https://drive-pc.quark.cn/1/clouddrive/file/search"
+        params = {
+            "pr": "ucpro", "fr": "pc", "uc_param_str": "",
+            "pdir_fid": "0", "filename": filename, "type": "0",
+            "_page": "1", "_size": "50",
+            "__dt": _random_dt(), "__t": _timestamp13(),
+        }
+        try:
+            r = self.session.get(api, params=params, headers=self.base_headers,
+                                 timeout=self.timeout)
+            data = r.json()
+        except Exception:
+            return None
+        for f in (data.get("data") or {}).get("list") or []:
+            if f.get("file_name") == filename and int(f.get("size") or 0) == size:
+                return f.get("fid")
+        return None
 
     def _list_file_index(self, dir_fid: str):
         """
@@ -611,7 +638,7 @@ class QuarkClient:
 
         self.status_callback("正在解析分享链接...", "info")
         stoken = self.get_stoken(pwd_id, passcode)
-        files, _ = self.walk_share(pwd_id, stoken)
+        files, _, is_owner = self.walk_share(pwd_id, stoken)
         if not files:
             raise QuarkError("分享内容为空或无法读取")
 
@@ -623,6 +650,60 @@ class QuarkClient:
         self.status_callback(
             f"分享内容共 {len(files)} 个文件，本次需下载 {len(targets)} 个"
             f"（{self._fmt_size(total_size)}）", "info")
+
+        # ---------- 自己的分享：跳过"转存"，直接下载网盘原文件 ----------
+        # 夸克限制：禁止"转存自己的分享"（报错"用户禁止转存自己的分享"）。
+        # 但分享里的文件本来就在你自己的网盘里——get_detail 返回的 fid 就是这些文件
+        # 在你网盘中的真实 fid，直接拿它去 /file/download 取下载地址即可，既不触发被禁
+        # 止的转存，也不会在你的网盘里产生重复副本。非本人的分享无法直下（fid 指向
+        # 分享者网盘、不在你网盘内），仍按下方原有逻辑转存后再下载。
+        if is_owner:
+            self.status_callback(
+                "检测到这是您自己的分享，已跳过转存，直接下载网盘中的原文件",
+                "success")
+            need_fids = [t["fid"] for t in targets]
+            try:
+                url_map = {i["fid"]: i for i in self.get_download_urls(need_fids)}
+            except QuarkError as e:
+                raise QuarkError(
+                    f"获取下载地址失败（请确认分享文件仍在您网盘中）：{e}") from e
+            downloaded = []
+            for t, fid in zip(targets, need_fids):
+                info = url_map.get(fid)
+                if not info or not info.get("download_url"):
+                    raise QuarkError(
+                        f"获取下载地址失败：{t['file_name']}"
+                        f"（请确认该文件仍在您网盘中）")
+                rel = t.get("rel_path") or ""
+                dest_dir = os.path.join(local_dir, rel) if rel else local_dir
+                self.status_callback(f"开始下载：{t['file_name']}", "info")
+                final_path = self.download_file(
+                    info["download_url"], os.path.join(dest_dir, t["file_name"]),
+                    expect_size=int(info.get("size") or t.get("size") or 0))
+                downloaded.append(final_path)
+            self.status_callback(
+                "全部文件下载完成（您自己的分享，未产生任何云端副本）", "success")
+            result_dir = (os.path.join(local_dir, targets[0]["rel_path"])
+                          if targets[0].get("rel_path") else local_dir)
+            if return_files:
+                return result_dir, downloaded
+            return result_dir
+
+        # ---------- 自己的网盘文件：跳过转存，直接下载 ----------
+        # 若分享链接指向的就是用户自己网盘里的文件，按"文件名+大小"在网盘里定位真实
+        # fid，命中则无需转存（省一次云端复制、也避免重复堆积文件），直接下载。
+        own_fid = {}
+        for t in targets:
+            name = t["file_name"]
+            size = int(t.get("size") or 0)
+            if size:
+                fid = self._find_own_file(name, size)
+                if fid:
+                    own_fid[name] = fid
+        if own_fid:
+            self.status_callback(
+                f"检测到 {len(own_fid)} 个文件已在您网盘中，跳过转存直接下载",
+                "success")
 
         # ---------- 云盘转存：直接放进「KnightModder」，不套子目录 ----------
         # 全部文件平铺在网盘 KnightModder/ 下；更新时先清掉该 Mod 的旧文件，
@@ -636,6 +717,9 @@ class QuarkClient:
             before_index = self._list_file_index(target_fid)
             old_fids = []
             for fname, items in before_index.items():
+                if fname in own_fid:
+                    # 自己网盘里已有的文件（本次要直接下载的）不清理，避免误删
+                    continue
                 stem = os.path.splitext(fname)[0]
                 fkey = re.sub(r"[\s\-_]+", "", stem).lower()
                 if owner_key and (fkey.startswith(owner_key) or owner_key in fkey):
@@ -678,6 +762,10 @@ class QuarkClient:
         for t in targets:
             name = t["file_name"]
             size = int(t.get("size") or 0)
+            if size and name in own_fid:
+                # 网盘里已有该文件（自己的分享）：直接复用真实 fid，跳过转存
+                reused_fid[name] = own_fid[name]
+                continue
             hit = None
             # force_transfer：不做复用，全部重新转存（sha 校验失败后的自愈重试）
             if size and not force_transfer and _belongs_to_this_mod(name):

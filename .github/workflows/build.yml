@@ -1,151 +1,80 @@
-name: Build Packages
+name: Build (Windows / macOS / Linux)
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ["v*"]
   workflow_dispatch:
 
-permissions:
-  contents: write   # 仅 release 作业需要
-
 jobs:
-  # -------------------- 读取版本号（各作业复用） --------------------
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.ver.outputs.version }}
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: KnightModder-Windows
+          - os: macos-latest
+            artifact: KnightModder-macOS
+          - os: ubuntu-latest
+            artifact: KnightModder-Linux
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - id: ver
-        run: echo "version=$(python -c 'import config;print(config.APP_VERSION)')" >> "$GITHUB_OUTPUT"
-        shell: bash
 
-  # -------------------- Windows：单文件 exe（含图标+版本资源） --------------------
-  windows:
-    needs: version
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt pyinstaller
-      - name: Build (onefile)
-        run: |
-          $QT_EXCLUDES = "QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
-          $EXCL_FLAGS = ""
-          foreach ($m in $QT_EXCLUDES.Split(' ')) { $EXCL_FLAGS += " --exclude-module PySide6.$m" }
-          pyinstaller --name "KnightModder v${{ needs.version.outputs.version }}" --onefile --windowed --noconfirm --strip $EXCL_FLAGS `
-            --hidden-import PySide6.QtWebEngineCore `
-            --hidden-import PySide6.QtWebEngineWidgets `
-            --hidden-import PySide6.QtWebEngineQuick `
-            --collect-submodules PySide6.QtWebEngineCore `
-            --icon assets/icon.png `
-            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" `
-            --add-data "assets:assets" `
-            main.py
-      - name: Rename artifact
-        run: Move-Item "dist/KnightModder v${{ needs.version.outputs.version }}.exe" "dist/KnightModder-Windows-v${{ needs.version.outputs.version }}.exe"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: KnightModder-Windows
-          path: dist/KnightModder-Windows-v*.exe
+          python-version: "3.10"
 
-  # -------------------- macOS：.app 封装成 .dmg --------------------
-  macos:
-    needs: version
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt pyinstaller
-      - name: Build .icns icon
+      - name: Install dependencies
         run: |
-          mkdir -p icon.iconset
-          sips -z 16 16   assets/icon.png --out icon.iconset/icon_16x16.png
-          sips -z 32 32   assets/icon.png --out icon.iconset/icon_16x16@2x.png
-          sips -z 32 32   assets/icon.png --out icon.iconset/icon_32x32.png
-          sips -z 64 64   assets/icon.png --out icon.iconset/icon_32x32@2x.png
-          sips -z 128 128 assets/icon.png --out icon.iconset/icon_128x128.png
-          sips -z 256 256 assets/icon.png --out icon.iconset/icon_128x128@2x.png
-          sips -z 256 256 assets/icon.png --out icon.iconset/icon_256x256.png
-          sips -z 512 512 assets/icon.png --out icon.iconset/icon_256x256@2x.png
-          sips -z 512 512 assets/icon.png --out icon.iconset/icon_512x512.png
-          sips -z 1024 1024 assets/icon.png --out icon.iconset/icon_512x512@2x.png
-          iconutil --convert icns icon.iconset
-      - name: PyInstaller (onedir -> .app)
-        run: |
-          # 排除从未使用的 Qt 附加模块以减小体积（与 main.spec 的 EXCLUDES 保持一致）
-          QT_EXCLUDES="QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
-          EXCL_FLAGS=""
-          for m in $QT_EXCLUDES; do EXCL_FLAGS="$EXCL_FLAGS --exclude-module PySide6.$m"; done
-          pyinstaller --name KnightModder --windowed --noconfirm --strip $EXCL_FLAGS \
-            --osx-bundle-identifier com.mioss.knightmodder \
-            --osx-entitlements-file entitlements.plist \
-            --icon KnightModder.icns \
-            --hidden-import PySide6.QtWebEngineCore \
-            --hidden-import PySide6.QtWebEngineWidgets \
-            --hidden-import PySide6.QtWebEngineQuick \
-            --collect-submodules PySide6.QtWebEngineCore \
-            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" \
-            --add-data "assets:assets" \
-            main.py
-      - name: Create .dmg
-        run: hdiutil create -volname KnightModder -srcfolder "dist/KnightModder.app" -ov -format UDZO "KnightModder-macOS-v${{ needs.version.outputs.version }}.dmg"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: KnightModder-macOS
-          path: KnightModder-macOS-v*.dmg
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
 
-  # -------------------- Linux：单文件二进制打包成 .tar.gz --------------------
-  linux:
-    needs: version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements.txt pyinstaller
-      - name: PyInstaller (onefile)
+      - name: Generate macOS icon (.icns)
+        if: runner.os == 'macOS'
         run: |
-          # 排除从未使用的 Qt 附加模块以减小体积（与 main.spec 的 EXCLUDES 保持一致）
-          QT_EXCLUDES="QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
-          EXCL_FLAGS=""
-          for m in $QT_EXCLUDES; do EXCL_FLAGS="$EXCL_FLAGS --exclude-module PySide6.$m"; done
-          pyinstaller --name KnightModder --onefile --windowed --noconfirm --strip $EXCL_FLAGS \
-            --hidden-import PySide6.QtWebEngineCore \
-            --hidden-import PySide6.QtWebEngineWidgets \
-            --hidden-import PySide6.QtWebEngineQuick \
-            --collect-submodules PySide6.QtWebEngineCore \
-            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" \
-            --add-data "assets:assets" \
-            main.py
-      - name: Package tar.gz
-        run: tar -czvf "KnightModder-Linux-v${{ needs.version.outputs.version }}.tar.gz" -C dist KnightModder
-      - uses: actions/upload-artifact@v4
-        with:
-          name: KnightModder-Linux
-          path: KnightModder-Linux-v*.tar.gz
+          mkdir -p assets/icon.iconset
+          sips -z 16 16     assets/icon.png --out assets/icon.iconset/icon_16x16.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_32x32.png
+          sips -z 64 64     assets/icon.png --out assets/icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   assets/icon.png --out assets/icon.iconset/icon_128x128.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_256x256.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/icon.png --out assets/icon.iconset/icon_512x512@2x.png
+          iconutil -c icns assets/icon.iconset -o assets/icon.icns
 
-  # -------------------- 打 v* 标签时自动发 Release --------------------
+      - name: Build single-file executable (PyInstaller)
+        run: pyinstaller --noconfirm main.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/KnightModder*
+          if-no-files-found: error
+
   release:
+    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [version, windows, macos, linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - uses: softprops/action-gh-release@v2
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: KnightModder v${{ needs.version.outputs.version }}
-          files: |
-            artifacts/KnightModder-Windows/*.exe
-            artifacts/KnightModder-macOS/*.dmg
-            artifacts/KnightModder-Linux/*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/*
+          generate_release_notes: true

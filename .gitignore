@@ -1,7 +1,6 @@
 /crash.log
 /dist
 /KnightModder.spec
-/main.spec
 /__pycache__
 /build.bat
 /config.json
@@ -13,3 +12,6 @@
 /diag_game_launch.py
 /diag_log.txt
 /downloads
+/file_version_info.txt
+/assets/icon.icns
+/assets/icon.iconset/
