@@ -3,13 +3,11 @@
 主窗口模块 - 现代化视觉设计（原生 Painter 窗口按钮）
 """
 import os
-import re
 import sys
 import time
 import threading
-import webbrowser
-from PySide6.QtCore import Qt, QTimer, QTime, QSize, QByteArray, QSettings, Signal
-from PySide6.QtGui import QFont, QColor, QLinearGradient, QPixmap, QPainter, QIcon, QPen, QCursor
+from PySide6.QtCore import Qt, QTimer, QTime, QSize, QSettings, Signal
+from PySide6.QtGui import QFont, QColor, QPainter, QIcon, QPen, QCursor
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -33,12 +31,6 @@ from config import (
     USAGE_URL_RAW,
     STEAM_APPID,
     STEAM_RUN_URL,
-    COLOR_BG,
-    COLOR_BORDER,
-    COLOR_ACCENT_GREEN,
-    COLOR_ACCENT_RED,
-    COLOR_ACCENT_PINK,
-    COLOR_TEXT_SECONDARY,
 )
 from ui.styles import DARK_STYLE_SHEET
 from ui.dialogs import (
@@ -70,7 +62,6 @@ from core import (
     install_api,
     restore_vanilla,
     install_mods,
-    launch_game,
 )
 from core.quark import QuarkError
 
@@ -221,85 +212,7 @@ class RoundedButton(QPushButton):
 # ============================================================
 # DLL信息提取工具
 # ============================================================
-def get_dll_identity(dll_path):
-    identity = {
-        'product_name': '',
-        'assembly_name': '',
-        'file_version': '',
-        'product_version': '',
-        'internal_name': '',
-        'original_filename': ''
-    }
 
-    try:
-        if sys.platform == 'win32':
-            import ctypes
-            from ctypes import wintypes
-
-            ver_size = ctypes.windll.version.GetFileVersionInfoSizeW(dll_path, None)
-            if ver_size == 0:
-                return identity
-
-            data = ctypes.create_string_buffer(ver_size)
-            ctypes.windll.version.GetFileVersionInfoW(dll_path, 0, ver_size, data)
-
-            def get_string_info(sub_block):
-                try:
-                    lang_codepage = None
-                    struct_ptr = ctypes.c_void_p()
-                    struct_len = ctypes.c_uint()
-                    if ctypes.windll.version.VerQueryValueW(
-                        data,
-                        '\\VarFileInfo\\Translation',
-                        ctypes.byref(struct_ptr),
-                        ctypes.byref(struct_len)
-                    ):
-                        if struct_len.value >= 4:
-                            lang_codepage = ctypes.cast(struct_ptr, ctypes.POINTER(wintypes.DWORD)).contents.value
-                            lang = lang_codepage & 0xFFFF
-                            codepage = (lang_codepage >> 16) & 0xFFFF
-                            query = f'\\StringFileInfo\\{lang:04x}{codepage:04x}\\{sub_block}'
-                            struct_ptr2 = ctypes.c_void_p()
-                            struct_len2 = ctypes.c_uint()
-                            if ctypes.windll.version.VerQueryValueW(
-                                data,
-                                query,
-                                ctypes.byref(struct_ptr2),
-                                ctypes.byref(struct_len2)
-                            ):
-                                if struct_len2.value and struct_len2.value > 0 and struct_ptr2.value is not None:
-                                    return ctypes.wstring_at(struct_ptr2.value, struct_len2.value // 2)
-                except Exception:
-                    pass
-                return ''
-
-            identity['product_name'] = get_string_info('ProductName')
-            identity['file_version'] = get_string_info('FileVersion')
-            identity['product_version'] = get_string_info('ProductVersion')
-            identity['internal_name'] = get_string_info('InternalName')
-            identity['original_filename'] = get_string_info('OriginalFilename')
-
-            if not identity['product_name']:
-                identity['product_name'] = get_string_info('InternalName')
-            if not identity['product_name']:
-                identity['product_name'] = get_string_info('OriginalFilename')
-
-    except Exception:
-        pass
-
-    if not identity['product_name'] and not identity['assembly_name']:
-        identity['product_name'] = os.path.basename(dll_path).replace('.dll', '')
-
-    return identity
-
-
-def get_dll_key(identity):
-    if identity['product_name']:
-        name = identity['product_name']
-        name = re.sub(r'[-_\.]?v?\d+\.\d+\.\d+.*$', '', name, flags=re.IGNORECASE)
-        name = re.sub(r'[-_\.]?\d+\.\d+\.\d+.*$', '', name, flags=re.IGNORECASE)
-        return name.strip()
-    return os.path.basename(identity.get('original_filename', '')).replace('.dll', '')
 
 
 # ============================================================
@@ -374,8 +287,6 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(500, self._auto_load_dependency)
 
     # ==================== 新增：config 是否存在 ====================
-    import os
-
     def _has_config(self):
         p = load_saved_path()
         if not p:

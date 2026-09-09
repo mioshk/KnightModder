@@ -33,9 +33,6 @@ import requests
 
 # ---------------- cookie 存取 ----------------
 
-QUARK_COOKIE_JSON_NAME = "quark_cookies.json"
-
-
 def _timestamp13() -> int:
     return int(time.time() * 1000)
 

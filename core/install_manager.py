@@ -260,8 +260,3 @@ def verify_zip_sha256(zip_path: str, expected_sha: str) -> bool:
     if not expected:
         return True
     return calc_file_sha256(zip_path) == expected
-
-
-def dedupe_target_path(mods_dir: str, dest_name: str) -> str:
-    """返回目标目录路径（安装前用于确认是否已存在同名 Mod）。"""
-    return os.path.join(mods_dir, dest_name)

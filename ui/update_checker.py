@@ -2,7 +2,7 @@
 """检查更新 - 夸克网盘分发（防双弹窗版）"""
 import io
 import json
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QPixmap, QFont, QIcon
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -314,8 +314,3 @@ def auto_check_for_updates(parent=None):
     chk.finished.connect(done)
     chk.start()
     setattr(auto_check_for_updates, '_ref', chk)
-
-
-def schedule_auto_check(parent=None, delay_ms=3000):
-    """延迟启动，避免阻塞主界面初始化"""
-    QTimer.singleShot(delay_ms, lambda: auto_check_for_updates(parent))

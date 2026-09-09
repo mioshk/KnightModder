@@ -168,22 +168,6 @@ def get_mods_dir(game_path):
     return os.path.join(get_managed_dir(game_path), "Mods")
 
 
-def get_disabled_dir(game_path):
-    """
-    获取 Disabled 文件夹路径（在 Mods 目录下）
-    """
-    mods_dir = get_mods_dir(game_path)
-    return os.path.join(mods_dir, "Disabled")
-
-
-def get_metadata_path(game_path):
-    """
-    获取元数据文件路径 (.metadata.json)
-    """
-    mods_dir = get_mods_dir(game_path)
-    return os.path.join(mods_dir, ".metadata.json")
-
-
 def get_game_exe_path(game_path):
     """
     获取游戏可执行文件路径。

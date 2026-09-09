@@ -15,8 +15,6 @@ from utils.common import (
     get_managed_dir,
     get_mods_dir,
     is_unity_mutex_held,
-    get_disabled_dir,
-    get_metadata_path,
     get_game_exe_path,
     open_path,
     find_hollow_knight_exe,

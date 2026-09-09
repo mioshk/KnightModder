@@ -3,7 +3,6 @@
 import os
 import re
 import time
-import webbrowser
 from typing import Callable, Optional
 from PySide6.QtCore import (
     Qt,
@@ -17,7 +16,6 @@ from PySide6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
     QPoint,
-    QPointF,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,7 +27,6 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QSplitter,
-    QTextEdit,
     QScrollArea,
     QMessageBox,
     QSizePolicy,
@@ -37,11 +34,9 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QSpacerItem,
-    QCheckBox,
-    QToolButton,
     QProgressBar,
 )
-from PySide6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap, QPainter, QPaintEvent, QMouseEvent, QCursor, QTextCursor
+from PySide6.QtGui import QFont, QCursor
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
 

@@ -1,120 +1,130 @@
-name: Build
+name: Build Packages
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
-# 创建 Release 需要写权限
 permissions:
-  contents: write
+  contents: write   # 仅 release 作业需要
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            py: '3.11'
-          - os: macos-latest        # Apple Silicon (arm64)
-            py: '3.11'
-            mac_arch: arm64
-          - os: macos-13            # Intel (x86_64)
-            py: '3.11'
-            mac_arch: x86_64
-          - os: ubuntu-latest
-            py: '3.11'
-    runs-on: ${{ matrix.os }}
+  # -------------------- 读取版本号（各作业复用） --------------------
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.py }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
-
-      - name: Build with PyInstaller
-        run: python build.py
-
-      - name: Sign + rename (macOS)
-        if: matrix.mac_arch != ''
+      - id: ver
+        run: echo "version=$(python -c 'import config;print(config.APP_VERSION)')" >> "$GITHUB_OUTPUT"
         shell: bash
-        run: |
-          codesign --force --options runtime --sign - --entitlements entitlements.plist dist/KnightModder
-          mv dist/KnightModder dist/KnightModder-macos-${{ matrix.mac_arch }}
 
-      - name: Rename (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          mv dist/KnightModder dist/KnightModder-linux
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+  # -------------------- Windows：单文件 exe（含图标+版本资源） --------------------
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: KnightModder-${{ matrix.os }}
-          path: |
-            dist/KnightModder.exe
-            dist/KnightModder-macos-arm64
-            dist/KnightModder-macos-x86_64
-            dist/KnightModder-linux
-          if-no-files-found: ignore
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pyinstaller
+      - run: pyinstaller main.spec
+      - name: Rename artifact
+        run: Move-Item "dist/KnightModder v${{ needs.version.outputs.version }}.exe" "dist/KnightModder-Windows-v${{ needs.version.outputs.version }}.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KnightModder-Windows
+          path: dist/KnightModder-Windows-v*.exe
 
-  # 合并两个 macOS 架构为 universal2（需在 macOS runner 上用 lipo）
-  merge-macos:
-    needs: build
+  # -------------------- macOS：.app 封装成 .dmg --------------------
+  macos:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: KnightModder-macos-latest
-          path: mac-arm64
-      - uses: actions/download-artifact@v4
-        with:
-          name: KnightModder-macos-13
-          path: mac-x86_64
-      - name: Lipo universal2
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Build .icns icon
         run: |
-          lipo -create mac-arm64/KnightModder-macos-arm64 mac-x86_64/KnightModder-macos-x86_64 -output KnightModder-macos
-          codesign --force --options runtime --sign - --entitlements entitlements.plist KnightModder-macos
-          file KnightModder-macos
+          mkdir -p icon.iconset
+          sips -z 16 16   assets/icon.png --out icon.iconset/icon_16x16.png
+          sips -z 32 32   assets/icon.png --out icon.iconset/icon_16x16@2x.png
+          sips -z 32 32   assets/icon.png --out icon.iconset/icon_32x32.png
+          sips -z 64 64   assets/icon.png --out icon.iconset/icon_32x32@2x.png
+          sips -z 128 128 assets/icon.png --out icon.iconset/icon_128x128.png
+          sips -z 256 256 assets/icon.png --out icon.iconset/icon_128x128@2x.png
+          sips -z 256 256 assets/icon.png --out icon.iconset/icon_256x256.png
+          sips -z 512 512 assets/icon.png --out icon.iconset/icon_256x256@2x.png
+          sips -z 512 512 assets/icon.png --out icon.iconset/icon_512x512.png
+          sips -z 1024 1024 assets/icon.png --out icon.iconset/icon_512x512@2x.png
+          iconutil --convert icns icon.iconset
+      - name: PyInstaller (onedir -> .app)
+        run: |
+          pyinstaller --name KnightModder --windowed --noconfirm \
+            --osx-bundle-identifier com.mioss.knightmodder \
+            --osx-entitlements-file entitlements.plist \
+            --icon KnightModder.icns \
+            --hidden-import PySide6.QtWebEngineCore \
+            --hidden-import PySide6.QtWebEngineWidgets \
+            --hidden-import PySide6.QtWebEngineQuick \
+            --collect-submodules PySide6.QtWebEngineCore \
+            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" \
+            --add-data "assets:assets" \
+            main.py
+      - name: Create .dmg
+        run: hdiutil create -volname KnightModder -srcfolder "dist/KnightModder.app" -ov -format UDZO "KnightModder-macOS-v${{ needs.version.outputs.version }}.dmg"
       - uses: actions/upload-artifact@v4
         with:
-          name: KnightModder-macos-universal
-          path: KnightModder-macos
+          name: KnightModder-macOS
+          path: KnightModder-macOS-v*.dmg
 
-  release:
-    needs: [build, merge-macos]
-    # 仅在有 tag 的推送时自动建 Release（手动触发只产出 artifact）
-    if: startsWith(github.ref, 'refs/tags/')
+  # -------------------- Linux：单文件二进制打包成 .tar.gz --------------------
+  linux:
+    needs: version
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pyinstaller
+      - name: PyInstaller (onefile)
+        run: |
+          pyinstaller --name KnightModder --onefile --windowed --noconfirm \
+            --hidden-import PySide6.QtWebEngineCore \
+            --hidden-import PySide6.QtWebEngineWidgets \
+            --hidden-import PySide6.QtWebEngineQuick \
+            --collect-submodules PySide6.QtWebEngineCore \
+            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" \
+            --add-data "assets:assets" \
+            main.py
+      - name: Package tar.gz
+        run: tar -czvf "KnightModder-Linux-v${{ needs.version.outputs.version }}.tar.gz" -C dist KnightModder
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KnightModder-Linux
+          path: KnightModder-Linux-v*.tar.gz
+
+  # -------------------- 打 v* 标签时自动发 Release --------------------
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, windows, macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: KnightModder-*
-          merge-multiple: true
-
-      - name: Stage release assets
-        shell: bash
-        run: |
-          mkdir -p upload
-          [ -f artifacts/KnightModder.exe ]    && cp artifacts/KnightModder.exe    upload/KnightModder-windows.exe
-          [ -f artifacts/KnightModder-macos ]  && cp artifacts/KnightModder-macos  upload/KnightModder-macos
-          [ -f artifacts/KnightModder-linux ]  && cp artifacts/KnightModder-linux  upload/KnightModder-linux
-          ls -la upload
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          files: upload/*
-          generate_release_notes: true
+          name: KnightModder v${{ needs.version.outputs.version }}
+          files: |
+            artifacts/KnightModder-Windows/*.exe
+            artifacts/KnightModder-macOS/*.dmg
+            artifacts/KnightModder-Linux/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

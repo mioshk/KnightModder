@@ -11,8 +11,6 @@ from core.installer import (
     restore_vanilla,
     # Mod 安装
     install_mods,
-    # 游戏启动
-    launch_game,
     # 模组管理
     disable_mod,
     enable_mod,
@@ -25,7 +23,6 @@ __all__ = [
     "install_api",
     "restore_vanilla",
     "install_mods",
-    "launch_game",
     "disable_mod",
     "enable_mod",
     "delete_mod",

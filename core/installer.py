@@ -8,8 +8,6 @@ import re
 import json
 import shutil
 import subprocess
-import os
-import time
 import zipfile
 import hashlib
 import xml.etree.ElementTree as ET
@@ -116,19 +114,6 @@ def remove_mod_metadata(game_path, mod_name):
         save_metadata(game_path, metadata)
 
 
-def get_mod_sha256(game_path, mod_name):
-    """
-    获取本地模组的SHA256值（从元数据读取）
-    :param game_path: 游戏根目录
-    :param mod_name: 模组名称
-    :return: SHA256字符串，不存在则返回None
-    """
-    metadata = load_metadata(game_path)
-    if mod_name in metadata:
-        return metadata[mod_name].get("sha256")
-    return None
-
-
 def get_mod_version_from_metadata(game_path, mod_name):
     """
     获取本地模组的版本号（从元数据读取）
@@ -142,85 +127,6 @@ def get_mod_version_from_metadata(game_path, mod_name):
         if re.sub(r"[ \-_\.]", "", (key or "").lower()) == target and isinstance(info, dict):
             return info.get("version")
     return None
-
-
-def scan_and_update_metadata(game_path, progress_callback=None):
-    """
-    扫描 Mods 目录下所有模组，计算 SHA256 并更新元数据文件
-    :param game_path: 游戏根目录
-    :param progress_callback: 进度回调函数
-    """
-    mods_dir = get_mods_dir(game_path)
-    if not os.path.exists(mods_dir):
-        if progress_callback:
-            progress_callback("⚠️ Mods 文件夹不存在，跳过扫描", "warning")
-        return {}
-
-    metadata = load_metadata(game_path)
-    modified = False
-
-    # 遍历 Mods 目录（跳过 Disabled 文件夹）
-    for item in os.listdir(mods_dir):
-        if item == "Disabled":
-            continue
-
-        item_path = os.path.join(mods_dir, item)
-        sha256 = None
-        mod_name = item
-
-        if os.path.isdir(item_path):
-            # 文件夹形式：查找第一个 .dll 文件
-            for root, dirs, files in os.walk(item_path):
-                for file in files:
-                    if file.endswith('.dll'):
-                        dll_path = os.path.join(root, file)
-                        sha256 = calculate_file_sha256(dll_path)
-                        break
-                if sha256:
-                    break
-        elif os.path.isfile(item_path) and item.endswith('.dll'):
-            # 单文件形式
-            sha256 = calculate_file_sha256(item_path)
-            mod_name = os.path.splitext(item)[0]
-
-        if sha256:
-            if mod_name not in metadata:
-                metadata[mod_name] = {}
-            if metadata[mod_name].get('sha256') != sha256:
-                metadata[mod_name]['sha256'] = sha256
-                if 'install_time' not in metadata[mod_name]:
-                    metadata[mod_name]['install_time'] = datetime.now().isoformat()
-                modified = True
-                if progress_callback:
-                    progress_callback(f"✅ 更新元数据：{mod_name}", "success")
-
-    # 检查是否有已删除的模组需要清理
-    existing_mods = set()
-    for item in os.listdir(mods_dir):
-        if item == "Disabled":
-            continue
-        if os.path.isdir(os.path.join(mods_dir, item)):
-            existing_mods.add(item)
-        elif os.path.isfile(os.path.join(mods_dir, item)) and item.endswith('.dll'):
-            existing_mods.add(os.path.splitext(item)[0])
-
-    # 移除已不存在的模组元数据
-    for mod_name in list(metadata.keys()):
-        if mod_name not in existing_mods:
-            del metadata[mod_name]
-            modified = True
-            if progress_callback:
-                progress_callback(f"🗑 清理已删除模组元数据：{mod_name}", "warning")
-
-    if modified:
-        save_metadata(game_path, metadata)
-        if progress_callback:
-            progress_callback(f"✅ 元数据已更新，共 {len(metadata)} 个模组", "success")
-    else:
-        if progress_callback:
-            progress_callback("✅ 所有模组元数据已是最新", "info")
-
-    return metadata
 
 
 # ==================== API 安装与还原（对齐 Lumafly 三文件互换） ====================
@@ -491,45 +397,6 @@ def install_mods(game_path, file_paths, progress_callback=None):
 
 
 # ==================== 游戏启动 ====================
-
-def launch_game(game_path, progress_callback=None):
-    """
-    启动游戏
-    :param game_path: 游戏根目录
-    :param progress_callback: 进度回调函数
-    """
-    system = get_system_type()
-    exe_path = get_game_exe_path(game_path)
-    if not exe_path:
-        if progress_callback:
-            progress_callback("❌ 未找到游戏可执行文件", "error")
-        raise FileNotFoundError(f"未找到游戏可执行文件：{game_path}")
-
-    try:
-        # 仅当用户选择的是 Steam 官方安装目录（与 Steam 库注册的 AppID 安装位置
-        # 一致）才经 Steam 启动：Popen 直启官方版会触发 Steamworks DRM 让游戏退出
-        # 并重启自己，造成双实例撞单实例锁弹 "another instance is already running"。
-        # 自定义副本（哪怕放在 steamapps\\common 下）必须直启用户指定目录，否则
-        # steam:// 会无视选择、永远启动 Steam 库里的官方版。
-        if is_steam_official_path(game_path, STEAM_APPID):
-            if system == "Windows":
-                os.startfile(STEAM_RUN_URL)
-            else:
-                subprocess.Popen(["open" if system == "Darwin" else "xdg-open", STEAM_RUN_URL])
-            if progress_callback:
-                progress_callback("✅ 已请求 Steam 启动游戏", "success")
-            return
-        if system == "Darwin":
-            # macOS 必须经由 open 启动 .app（直接 Popen .app 路径无效）
-            subprocess.Popen(["open", exe_path])
-        else:
-            subprocess.Popen([exe_path], cwd=game_path)
-        if progress_callback:
-            progress_callback("✅ 游戏已启动", "success")
-    except Exception as e:
-        if progress_callback:
-            progress_callback(f"❌ 启动失败：{e}", "error")
-        raise RuntimeError(f"启动失败：{e}")
 
 
 # ==================== 模组启用/禁用/删除 ====================
