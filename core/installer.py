@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 安装器核心模块
-包含API安装、原版还原、Mod安装、游戏启动、模组启用/禁用/删除、依赖解析等功能
+包含 API 安装、原版还原、Mod 安装、模组启用/禁用/删除、依赖解析等功能。
+（游戏启动逻辑在 ui/main_window.py 的 MainWindow._launch_game，不在本模块）
 """
 import os
 import re

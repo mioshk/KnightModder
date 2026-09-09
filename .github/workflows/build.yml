@@ -65,7 +65,11 @@ jobs:
           iconutil --convert icns icon.iconset
       - name: PyInstaller (onedir -> .app)
         run: |
-          pyinstaller --name KnightModder --windowed --noconfirm \
+          # 排除从未使用的 Qt 附加模块以减小体积（与 main.spec 的 EXCLUDES 保持一致）
+          QT_EXCLUDES="QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
+          EXCL_FLAGS=""
+          for m in $QT_EXCLUDES; do EXCL_FLAGS="$EXCL_FLAGS --exclude-module PySide6.$m"; done
+          pyinstaller --name KnightModder --windowed --noconfirm --strip $EXCL_FLAGS \
             --osx-bundle-identifier com.mioss.knightmodder \
             --osx-entitlements-file entitlements.plist \
             --icon KnightModder.icns \
@@ -95,7 +99,11 @@ jobs:
       - run: pip install -r requirements.txt pyinstaller
       - name: PyInstaller (onefile)
         run: |
-          pyinstaller --name KnightModder --onefile --windowed --noconfirm \
+          # 排除从未使用的 Qt 附加模块以减小体积（与 main.spec 的 EXCLUDES 保持一致）
+          QT_EXCLUDES="QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
+          EXCL_FLAGS=""
+          for m in $QT_EXCLUDES; do EXCL_FLAGS="$EXCL_FLAGS --exclude-module PySide6.$m"; done
+          pyinstaller --name KnightModder --onefile --windowed --noconfirm --strip $EXCL_FLAGS \
             --hidden-import PySide6.QtWebEngineCore \
             --hidden-import PySide6.QtWebEngineWidgets \
             --hidden-import PySide6.QtWebEngineQuick \

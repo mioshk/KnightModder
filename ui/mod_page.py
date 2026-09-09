@@ -405,29 +405,21 @@ class ModListItemWidget(QWidget):
         self._update_bg_style()
 
     def update_status(self, enabled):
+        """切换启用/禁用后立即刷新状态文案与徽标，直接显示最终态
+        （已启用 / 已禁用），避免先闪一下「已开启 / 已关闭」中间态。"""
         self.enabled = enabled
         self._update_status_dot(enabled)
-        self.status_label.setText("已开启" if enabled else "已关闭")
+        self._clear_status_badges()
         if enabled:
-            self.status_label.setStyleSheet("""
-                QLabel {
-                    color: #34c759;
-                    background: transparent;
-                    border: none;
-                    padding: 0px;
-                    font-size: 11px;
-                }
-            """)
+            self.status_label.setText("✅ 模组已启用")
+            self.status_label.setStyleSheet(
+                "color: #34c759; background: transparent; border: none;")
+            self._add_status_badge("已启用", "#ffffff", "#34c759")
         else:
-            self.status_label.setStyleSheet("""
-                QLabel {
-                    color: #888888;
-                    background: transparent;
-                    border: none;
-                    padding: 0px;
-                    font-size: 11px;
-                }
-            """)
+            self.status_label.setText("⛔ 模组已禁用")
+            self.status_label.setStyleSheet(
+                "color: #ff6b6b; background: transparent; border: none;")
+            self._add_status_badge("已禁用", "#ffffff", "#888888")
 
 
 class OnlineModListItemWidget(QWidget):
