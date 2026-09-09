@@ -31,7 +31,20 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller main.spec
+      - name: Build (onefile)
+        run: |
+          $QT_EXCLUDES = "QtQml QtQuick QtQuickWidgets QtQuickControls2 QtQuick3D Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation Qt3DQuick Qt3DQuickAnimation Qt3DQuickExtras Qt3DQuickInput Qt3DQuickRender Qt3DQuickScene2D QtCharts QtChartsQml QtDataVisualization QtDataVisualizationQml QtMultimedia QtMultimediaWidgets QtMultimediaQuick QtBluetooth QtSerialPort QtPositioning QtLocation QtNfc QtScxml QtStateMachine QtSensors QtRemoteObjects QtNetworkAuth QtTextToSpeech QtHelp QtDesigner QtUiTools QtTest QtWebView QtPdf QtPdfWidgets QtXmlPatterns QtWinExtras QtMacExtras QtX11Extras QtGamepad QtGraphicalEffects QtVirtualKeyboard QtFeedback QtVersit QtOrganizer QtContacts QtCalendar QtWebKit QtWebKitWidgets QtPrintSupport QtSvg QtOpenGLWidgets"
+          $EXCL_FLAGS = ""
+          foreach ($m in $QT_EXCLUDES.Split(' ')) { $EXCL_FLAGS += " --exclude-module PySide6.$m" }
+          pyinstaller --name "KnightModder v${{ needs.version.outputs.version }}" --onefile --windowed --noconfirm --strip $EXCL_FLAGS `
+            --hidden-import PySide6.QtWebEngineCore `
+            --hidden-import PySide6.QtWebEngineWidgets `
+            --hidden-import PySide6.QtWebEngineQuick `
+            --collect-submodules PySide6.QtWebEngineCore `
+            --icon assets/icon.png `
+            --add-data "ui:ui" --add-data "core:core" --add-data "utils:utils" `
+            --add-data "assets:assets" `
+            main.py
       - name: Rename artifact
         run: Move-Item "dist/KnightModder v${{ needs.version.outputs.version }}.exe" "dist/KnightModder-Windows-v${{ needs.version.outputs.version }}.exe"
       - uses: actions/upload-artifact@v4
