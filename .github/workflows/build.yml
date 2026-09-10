@@ -64,13 +64,23 @@ jobs:
           $ext = $exe.Extension
           Rename-Item $exe.FullName -NewName "KnightModder-v$ver-${{ matrix.suffix }}$ext"
 
-      - name: Rename artifact (macOS / Linux)
-        if: runner.os != 'Windows'
+      - name: Package artifact (macOS onedir -> zip)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FOLDER=$(ls -d dist/KnightModder* | head -1)
+          cd dist
+          zip -r "KnightModder-v${VERSION}-macos.zip" "$(basename "$FOLDER")"
+          rm -rf "$(basename "$FOLDER")"
+
+      - name: Rename artifact (Linux onefile)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           FILE=$(ls dist/KnightModder* | head -1)
-          mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}"
+          mv "$FILE" "dist/KnightModder-v${VERSION}-linux"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

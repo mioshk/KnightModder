@@ -531,6 +531,10 @@ def is_unity_mutex_held(candidates=None):
       （例如被杀软挂起、其他会话残留、其他 Mod 工具持有的同名锁）
     返回被占用 mutex 的名称，无占用返回 None。
     """
+    # Mutex 是 Windows 专属机制，非 Windows 直接返回 None（macOS/Linux 无 kernel32）
+    if sys.platform != "win32":
+        return None
+
     import ctypes
     from ctypes import wintypes
 
