@@ -1202,43 +1202,47 @@ class MainWindow(QMainWindow):
 
     # ==================== 游戏进程检测与停止 ====================
     def _find_game_process(self):
-        """检测 hollow_knight.exe 进程。
+        """检测 hollow_knight 进程（跨平台）。
 
-        psutil 为主，tasklist 兜底：
-        - psutil 枚举其他用户会话的进程时，info['name'] 可能因权限返回空/抛 AccessDenied，
-          整条进程被 continue 跳过 → 漏检 → 重复启动 → 游戏弹 "another instance is already running"
-        - tasklist 即使对别的用户/会话进程也能列出镜像名和 PID，作为第二道保险
+        psutil 为主（所有平台），Windows 下再用 tasklist 兜底：
+        - tasklist 能列出其他会话/用户的进程，补 psutil 因权限漏检的情况；
+        - macOS / Linux 无 tasklist 命令，依赖 psutil 即可（游戏与安装器同为当前用户）。
+        进程名匹配放宽：hollow_knight.exe / hollow_knight / Hollow Knight 等均可命中。
         """
         import subprocess
 
-        # ① psutil 枚举（快，全覆盖）
+        def _name_match(name):
+            n = (name or '').lower()
+            return 'hollow' in n and 'knight' in n
+
+        # ① psutil 枚举（跨平台，覆盖当前用户进程）
         try:
             import psutil  # 延迟导入，避免拖慢启动
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    name = (proc.info.get('name') or '').lower()
-                    if name == 'hollow_knight.exe':
+                    if _name_match(proc.info.get('name')):
                         return proc
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
         except Exception as e:
             self._log(f"进程检测(psutil)异常: {e}", "error")
 
-        # ② tasklist 兜底：列出所有会话/用户的进程（含 psutil 漏检的）
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            for line in out.stdout.splitlines():
-                parts = [p.strip('" ') for p in line.strip().split('","')]
-                if parts and parts[0].lower() == 'hollow_knight.exe' and len(parts) >= 2 and parts[1].isdigit():
-                    pid = int(parts[1])
-                    # 构造兼容 proc.info['pid'] / proc.info['name'] 的对象
-                    return type("Proc", (), {"info": {"pid": pid, "name": "hollow_knight.exe"}})()
-        except Exception as e:
-            self._log(f"进程检测(tasklist)异常: {e}", "error")
+        # ② tasklist 兜底（仅 Windows：可列出其他会话/用户进程，补 psutil 漏检）
+        if sys.platform == "win32":
+            try:
+                out = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                for line in out.stdout.splitlines():
+                    parts = [p.strip('" ') for p in line.strip().split('","')]
+                    if parts and parts[0].lower() == 'hollow_knight.exe' and len(parts) >= 2 and parts[1].isdigit():
+                        pid = int(parts[1])
+                        # 构造兼容 proc.info['pid'] / proc.info['name'] 的对象
+                        return type("Proc", (), {"info": {"pid": pid, "name": "hollow_knight.exe"}})()
+            except Exception as e:
+                self._log(f"进程检测(tasklist)异常: {e}", "error")
 
         return None
 
