@@ -70,12 +70,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           FILE=$(ls dist/KnightModder* | head -1)
-          EXT="${FILE##*.}"
-          if [ "$EXT" != "$FILE" ]; then
-            mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}.${EXT}"
-          else
-            mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}"
-          fi
+          mv "$FILE" "dist/KnightModder-v${VERSION}-${{ matrix.suffix }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
