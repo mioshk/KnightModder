@@ -77,6 +77,9 @@ class QuarkClient:
         self.status_callback = status_callback or (lambda *a: None)
         self.timeout = timeout
         self.session = requests.Session()
+        # 夸克为国内服务，无需走代理；忽略系统/环境代理，避免本机代理（如 Clash 7890）
+        # 未开或异常时导致 ProxyError 使所有分享链接"不可用"。
+        self.session.trust_env = False
 
         cookie = cookie_str or self._read_cookie_file(cookie_path) if cookie_path else cookie_str
         self.cookies = self._normalize_cookie_str(cookie)

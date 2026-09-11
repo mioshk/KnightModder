@@ -439,21 +439,41 @@ def find_hollow_knight_exe():
 # ============================================================
 def safe_requests_get(url, timeout=10, fallback_on_ssl=True, ssl_warn_callback=None, **kwargs):
     """
-    带 SSL 证书验证失败自动降级的 requests.get 包装。
-    个别精简/老版本 Windows 系统可能出现根证书缺失，导致证书验证失败。
-    此函数在首次验证失败时自动使用 verify=False 重试一次。
+    带 SSL 证书验证失败自动降级、以及代理不可用自动直连的 requests.get 包装。
+    - 个别精简/老版本 Windows 系统可能出现根证书缺失，导致证书验证失败：
+      首次失败时自动使用 verify=False 重试一次。
+    - 本机代理（如 Clash）未开或异常时，requests 读取系统代理会抛 ProxyError：
+      此时忽略代理直连重试一次，避免"所有分享链接不可用"。
     """
     import requests
-    try:
-        return requests.get(url, timeout=timeout, **kwargs)
-    except requests.exceptions.SSLError:
+    explicit_proxies = "proxies" in kwargs
+
+    def _ssl_fallback(retry_kwargs):
         if not fallback_on_ssl:
             raise
         if ssl_warn_callback:
             ssl_warn_callback("⚠️ 检测到 SSL 证书验证失败，正在尝试跳过证书验证继续下载...")
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        return requests.get(url, timeout=timeout, verify=False, **kwargs)
+        retry_kwargs = dict(retry_kwargs)
+        retry_kwargs["verify"] = False
+        return requests.get(url, timeout=timeout, **retry_kwargs)
+
+    try:
+        return requests.get(url, timeout=timeout, **kwargs)
+    except requests.exceptions.ProxyError:
+        # 调用方显式指定了代理则尊重其选择，不擅自改
+        if explicit_proxies:
+            raise
+        # 忽略系统/环境代理，直连重试
+        direct_kwargs = dict(kwargs)
+        direct_kwargs["proxies"] = {"http": None, "https": None}
+        try:
+            return requests.get(url, timeout=timeout, **direct_kwargs)
+        except requests.exceptions.SSLError:
+            return _ssl_fallback(direct_kwargs)
+    except requests.exceptions.SSLError:
+        return _ssl_fallback(kwargs)
 
 
 def fetch_remote_content(cdn_url, raw_url, timeout=10, ssl_warn_callback=None):
