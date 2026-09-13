@@ -1,8 +1,9 @@
 name: Build (Windows / macOS / Linux)
 
 on:
+  # 只在推 tag 时构建并发布 Release；推 main 不再触发，避免产生无 Release 的冗余构建。
+  # 需要手动构建时用 workflow_dispatch。
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 

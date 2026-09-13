@@ -587,6 +587,11 @@ class QuarkClient:
 
         r = self.session.get(url, headers=headers, stream=True, timeout=self.timeout)
         if r.status_code not in (200, 206):
+            if r.status_code in (403, 412, 429):
+                raise QuarkError(
+                    f"下载失败（HTTP {r.status_code}，夸克直链被拒/风控）："
+                    f"多为登录态失效、并发过高或账号临时风控，"
+                    f"请重新登录夸克账号、降低并发或稍后重试")
             raise QuarkError(f"下载失败（HTTP {r.status_code}）")
         if resumed and r.status_code == 200:
             # 服务器忽略了 Range 请求（返回完整内容）：不能追加，必须从头写
@@ -610,6 +615,38 @@ class QuarkClient:
             self.progress_callback(done, done, os.path.basename(save_path))
         os.replace(part_path, save_path)
         return save_path
+
+    def _download_with_refresh(self, fid: str, info: dict, save_path: str,
+                               expect_size: int = 0, max_retry: int = 3) -> str:
+        """下载单个文件；遇到 403/412/429（直链被拒/风控/过期）时刷新直链重试。
+
+        夸克 download_url 为短时效签名直链，且并发/频率过高会触发风控返回 412。
+        这里在失败时重新调用 file/download 取一条新直链再试，配合递增等待，
+        对"直链过期"和"短暂风控"都能自愈；账号级持续风控则重试后仍会抛出。
+        """
+        url = info.get("download_url")
+        if not url:
+            raise QuarkError("获取下载地址失败：直链为空")
+        last_err = None
+        for attempt in range(max_retry):
+            try:
+                return self.download_file(url, save_path, expect_size=expect_size)
+            except QuarkError as e:
+                last_err = e
+                msg = str(e)
+                # 仅对"直链被拒"类错误刷新重试；其他错误（如磁盘/网络）直接抛
+                if not any(code in msg for code in ("403", "412", "429")):
+                    raise
+                if attempt >= max_retry - 1:
+                    raise
+                time.sleep(1.5 * (attempt + 1))
+                try:
+                    fresh = self.get_download_urls([fid])
+                    if fresh and fresh[0].get("download_url"):
+                        url = fresh[0]["download_url"]
+                except Exception:  # noqa: BLE001 刷新失败则用旧直链再试一次
+                    pass
+        raise last_err
 
     # ---------------- 组合流程 ----------------
 
@@ -680,8 +717,8 @@ class QuarkClient:
                 rel = t.get("rel_path") or ""
                 dest_dir = os.path.join(local_dir, rel) if rel else local_dir
                 self.status_callback(f"开始下载：{t['file_name']}", "info")
-                final_path = self.download_file(
-                    info["download_url"], os.path.join(dest_dir, t["file_name"]),
+                final_path = self._download_with_refresh(
+                    fid, info, os.path.join(dest_dir, t["file_name"]),
                     expect_size=int(info.get("size") or t.get("size") or 0))
                 downloaded.append(final_path)
             self.status_callback(
@@ -869,8 +906,8 @@ class QuarkClient:
             dest_dir = os.path.join(local_dir, rel) if rel else local_dir
             self.status_callback(f"开始下载：{t['file_name']}", "info")
             # 用分享里的原始文件名保存（云端若被自动改名也不影响本地文件名）
-            final_path = self.download_file(
-                info["download_url"], os.path.join(dest_dir, t["file_name"]),
+            final_path = self._download_with_refresh(
+                fid, info, os.path.join(dest_dir, t["file_name"]),
                 expect_size=int(info.get("size") or t.get("size") or 0))
             downloaded.append(final_path)
 
