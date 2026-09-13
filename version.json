@@ -1,6 +1,6 @@
 {
-  "version": "1.4.0",
-  "release_date": "2026-09-09",
-  "changelog": "- 新增 macOS 与 Linux 平台支持\n- 新增夸克网盘内嵌浏览器登录,现在可以一键下载并且直接安装mod了\n- 版本获取不再依赖游戏的ModLog，更新机制更精准",
+  "version": "1.4.1",
+  "release_date": "2026-09-13",
+  "changelog": "- 修复了“所有分享均不可用”的bug（测试中）\n- 新增 macOS 与 Linux 平台支持\n- 新增夸克网盘内嵌浏览器登录,现在可以一键下载并且直接安装mod了\n- 版本获取不再依赖游戏的ModLog，更新机制更精准",
   "quark_link": "https://pan.quark.cn/s/033d87a393ee"
 }
