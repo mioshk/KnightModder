@@ -786,6 +786,10 @@ class DependencyResolver:
                 if integrations_elem is not None and integrations_elem.text:
                     integrations = [intg.strip() for intg in integrations_elem.text.split(';') if intg.strip()]
 
+                # 提取原仓库地址（XML <Repository>，详情页用 GitHub 图标跳转）
+                repo_elem = mod.find('./Repository')
+                repository = repo_elem.text.strip() if repo_elem is not None and repo_elem.text else ""
+
                 self.all_mods.add(name)
 
                 if qlink:
@@ -812,6 +816,7 @@ class DependencyResolver:
                     "desc_cn": desc_cn,
                     "desc_en": desc_en,
                     "integrations": integrations,
+                    "repository": repository,
                 }
                 self.mod_data.append(mod_info)
                 self.mod_data_by_name[name] = mod_info

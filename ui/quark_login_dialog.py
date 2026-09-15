@@ -117,7 +117,7 @@ class QuarkLoginDialog(QDialog):
 
         tip = QLabel(
             "在下方官方登录页中完成登录：推荐用夸克App「扫一扫」扫码，也可切换手机号/账密登录。\n"
-            "登录成功后本窗口会自动保存并关闭（无需手动复制任何内容）。"
+            "切换账号时请先在页面里退出当前账号，再登录新账号；成功后本窗口会自动保存并关闭。"
         )
         tip.setFont(QFont("Microsoft YaHei", 10))
         tip.setStyleSheet(f"color: {_COLOR_TEXT_SUB}; background: transparent;")
@@ -126,7 +126,7 @@ class QuarkLoginDialog(QDialog):
 
         # 状态提示条（验证中 / 成功 / 失败原因）
         self._state_label = QLabel("等待登录...")
-        self._state_label.setFixedHeight(20)
+        self._state_label.setMinimumHeight(20)
         self._state_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
         self._state_label.setStyleSheet(
             f"color: {_COLOR_TEXT_DIM}; background: transparent;")
@@ -194,19 +194,48 @@ class QuarkLoginDialog(QDialog):
             self._set_state("当前环境缺少 QtWebEngine，请使用「手动粘贴 Cookie」登录。",
                             _COLOR_WARN)
             return
-        # 无参构造即离屏会话（不落盘，每次登录都是全新会话，避免旧 Cookie 干扰判定）
+        # 无参构造 = 离屏、不落盘。命名 Profile 会把旧账号写到磁盘，
+        # 「切换账号」打开登录页时会直接带着上一次会话，看起来像没换成功。
         self._profile = QWebEngineProfile(self)
-        self._profile.cookieStore().cookieAdded.connect(self._on_cookie_added)
+        try:
+            self._profile.setPersistentCookiesPolicy(
+                QWebEngineProfile.NoPersistentCookies)
+        except Exception:
+            pass
+        store = self._profile.cookieStore()
+        try:
+            store.deleteAllCookies()
+        except Exception:
+            pass
+        store.cookieAdded.connect(self._on_cookie_added)
+        try:
+            store.cookieRemoved.connect(self._on_cookie_removed)
+        except Exception:
+            pass
 
         self._view = QWebEngineView(self)
         page = QWebEnginePage(self._profile, self._view)
         self._view.setPage(page)
+        self._view.loadFinished.connect(self._on_load_finished)
         self._browser_container.addWidget(self._view)
         self._load_home()
 
     def _load_home(self):
         if self._view:
             self._view.load(QUrl(QUARK_HOME_URL))
+
+    def _on_load_finished(self, _ok: bool):
+        """页面加载完后把已有 Cookie 再广播一遍，避免只靠 cookieAdded 漏捕获。"""
+        try:
+            if self._profile is not None:
+                self._profile.cookieStore().loadAllCookies()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_quark_cookie_domain(domain: str) -> bool:
+        from core.quark import is_quark_cookie_domain
+        return is_quark_cookie_domain(domain)
 
     # ---------- Cookie 捕获 ----------
     def _on_cookie_added(self, cookie: QNetworkCookie):
@@ -216,8 +245,7 @@ class QuarkLoginDialog(QDialog):
             value = _as_str(cookie.value())
             if not name or not value:
                 return
-            # 只收夸克域下的 Cookie，避免混入无关第三方
-            if "quark.cn" not in domain.lower():
+            if not self._is_quark_cookie_domain(domain):
                 return
             self._cookies[name] = value
             if len(self._cookies) > 80:  # 防御性上限
@@ -228,11 +256,32 @@ class QuarkLoginDialog(QDialog):
         except Exception:
             pass
 
+    def _on_cookie_removed(self, cookie: QNetworkCookie):
+        try:
+            name = _as_str(cookie.name())
+            if name:
+                self._cookies.pop(name, None)
+        except Exception:
+            pass
+
     def _cookie_header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self._cookies.items())
 
     def _has_key_cookies(self) -> bool:
         return bool(self._cookies.get("__pus")) and bool(self._cookies.get("__puus"))
+
+    def _is_same_saved_account(self, header: str) -> bool:
+        """当前捕获的登录态是否就是 config.json 里已经保存的那个号。"""
+        try:
+            from core.quark import cookie_login_identity
+            from utils.common import load_quark_cookie
+            saved = load_quark_cookie()
+        except Exception:
+            return False
+        if not saved:
+            return False
+        ident = cookie_login_identity(header)
+        return bool(ident[0]) and ident == cookie_login_identity(saved)
 
     # ---------- 状态 ----------
     def _set_state(self, text, color=_COLOR_TEXT_DIM):
@@ -243,6 +292,13 @@ class QuarkLoginDialog(QDialog):
     # ---------- 自动 / 手动验证 ----------
     def _tick(self):
         """轮询：检测到关键 Cookie 且内容有变化时自动发起验证（失败会冷却重试）"""
+        # Qt WebEngine 更新同名 Cookie 时经常不发 cookieAdded，只发一次。
+        # 切号后 __pus 值已经变了，内存里还是旧值，必须主动 loadAllCookies 再广播。
+        try:
+            if self._profile is not None:
+                self._profile.cookieStore().loadAllCookies()
+        except Exception:
+            pass
         if not self._has_key_cookies():
             return
         if self._checking:
@@ -250,6 +306,14 @@ class QuarkLoginDialog(QDialog):
         header = self._cookie_header()
         if header == self._last_checked_header:
             return  # 内容没变说明还没真正登录成功，等登录页刷新 Cookie
+        if self._is_same_saved_account(header):
+            # 切换账号时如果页面还停在旧号，绝不能自动把旧 Cookie 再写回去
+            self._last_checked_header = header
+            self._set_state("仍是当前账号。请先在页面中退出，再登录要切换的新账号。",
+                            _COLOR_WARN)
+            if self._has_key_cookies():
+                self._finish_btn.setEnabled(True)
+            return
         self._start_verify(header, auto=True)
 
     def _manual_finish(self):
@@ -257,7 +321,12 @@ class QuarkLoginDialog(QDialog):
             self._set_state("还没捕获到有效登录态，请在页面里完成登录后再点这里。",
                             _COLOR_WARN)
             return
-        self._start_verify(self._cookie_header(), auto=False)
+        header = self._cookie_header()
+        if self._is_same_saved_account(header):
+            self._set_state("仍是当前账号。请先在页面中退出当前账号，再登录新账号。",
+                            _COLOR_WARN)
+            return
+        self._start_verify(header, auto=False)
 
     def _start_verify(self, header: str, auto: bool):
         self._checking = True

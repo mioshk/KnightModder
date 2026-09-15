@@ -27,9 +27,45 @@ import json
 import os
 import random
 import re
+import threading
 import time
+from http.cookiejar import DefaultCookiePolicy
 
 import requests
+
+# CDN 直链全局串行：QuarkPanTool 本身就是逐个 await 下载。
+# 多路同时打夸克 CDN 是 412 风控的主要来源，API 转存仍可并行。
+_CDN_LOCK = threading.Lock()
+
+
+class _BlockCookies(DefaultCookiePolicy):
+    """禁止 Session 自动收/发 Cookie。Cookie 只走我们显式设置的 header，
+    避免和 Cookie 头拼成重复/脏 Cookie 被 CDN 回 412。"""
+
+    def set_ok(self, cookie, request):  # noqa: ARG002
+        return False
+
+    def return_ok(self, cookie, request):  # noqa: ARG002
+        return False
+
+
+def is_quark_cookie_domain(domain: str) -> bool:
+    """夸克登录 Cookie 的域是 pan.quark.cn / .quark.cn；空域也收（host-only）。"""
+    d = (domain or "").lower().lstrip(".")
+    if not d:
+        return True
+    return "quark" in d
+
+
+def cookie_login_identity(header: str) -> tuple:
+    """从 Cookie 头取出登录身份（__pus, __puus），用于判断是否切到了新账号。"""
+    pairs = {}
+    for part in (header or "").split(";"):
+        if "=" not in part:
+            continue
+        k, v = part.strip().split("=", 1)
+        pairs[k] = v
+    return pairs.get("__pus", ""), pairs.get("__puus", "")
 
 # ---------------- cookie 存取 ----------------
 
@@ -80,6 +116,8 @@ class QuarkClient:
         # 夸克为国内服务，无需走代理；忽略系统/环境代理，避免本机代理（如 Clash 7890）
         # 未开或异常时导致 ProxyError 使所有分享链接"不可用"。
         self.session.trust_env = False
+        # Cookie 只放在 header 里（与 QuarkPanTool 一致）；禁止 jar 再拼一份。
+        self.session.cookies.set_policy(_BlockCookies())
 
         cookie = cookie_str or self._read_cookie_file(cookie_path) if cookie_path else cookie_str
         self.cookies = self._normalize_cookie_str(cookie)
@@ -559,70 +597,70 @@ class QuarkClient:
             return out
         raise QuarkError(f"获取下载地址失败：{last_err or '未知错误'}")
 
-    def download_file(self, url: str, save_path: str, expect_size: int = 0) -> str:
-        """流式下载单个文件，支持断点续传。返回最终文件路径
+    def download_file(self, url: str, save_path: str, expect_size: int = 0) -> str:  # noqa: ARG002
+        """流式下载单个文件。返回最终文件路径。
 
-        :param expect_size: 期望的文件大小（来自分享信息）。用于防止把「上一次
-            中断下载的旧版本残留 .part」当成断点续传的起点拼进新版本里。
+        对齐 QuarkPanTool：独立请求、不带 Range、每次覆盖写。
+        夸克 CDN 对 Range 经常直接回 412，断点续传会把一次失败锁死成一直 412。
         """
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         part_path = save_path + ".part"
-        resumed = os.path.getsize(part_path) if os.path.isfile(part_path) else 0
-        if resumed and expect_size and resumed > expect_size:
-            # 残留分片比新版本还大（旧版本残留）：丢弃重下
-            try:
+        try:
+            if os.path.isfile(part_path):
                 os.remove(part_path)
-            except OSError:
-                pass
-            resumed = 0
+        except OSError:
+            pass
+        with _CDN_LOCK:
+            return self._stream_download(url, save_path, part_path)
 
+    def _stream_download(self, url: str, save_path: str, part_path: str) -> str:
+        """对 CDN 直链做一次 GET。独立 Session，header 与 QuarkPanTool 一致。"""
         headers = {
             "user-agent": self.DL_UA,
             "origin": "https://pan.quark.cn",
             "referer": "https://pan.quark.cn/",
             "cookie": self.cookies,
         }
-        if resumed:
-            headers["range"] = f"bytes={resumed}-"
+        sess = requests.Session()
+        sess.trust_env = False
+        sess.cookies.set_policy(_BlockCookies())
+        try:
+            r = sess.get(url, headers=headers, stream=True, timeout=self.timeout)
+            if r.status_code not in (200, 206):
+                if r.status_code in (403, 412, 429):
+                    raise QuarkError(
+                        f"下载失败（HTTP {r.status_code}，夸克直链被拒/风控）："
+                        f"请切换夸克账号后重试，或把下载并行数调到 1")
+                raise QuarkError(f"下载失败（HTTP {r.status_code}）")
 
-        r = self.session.get(url, headers=headers, stream=True, timeout=self.timeout)
-        if r.status_code not in (200, 206):
-            if r.status_code in (403, 412, 429):
-                raise QuarkError(
-                    f"下载失败（HTTP {r.status_code}，夸克直链被拒/风控）："
-                    f"多为登录态失效、并发过高或账号临时风控，"
-                    f"请重新登录夸克账号、降低并发或稍后重试")
-            raise QuarkError(f"下载失败（HTTP {r.status_code}）")
-        if resumed and r.status_code == 200:
-            # 服务器忽略了 Range 请求（返回完整内容）：不能追加，必须从头写
-            resumed = 0
+            total = None
+            if "content-length" in r.headers:
+                total = int(r.headers.get("content-length") or 0)
 
-        total = None
-        if "content-length" in r.headers:
-            total = int(r.headers.get("content-length") or 0) + resumed
-
-        mode = "ab" if resumed else "wb"
-        done = resumed
-        with open(part_path, mode) as f:
-            for chunk in r.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    f.write(chunk)
-                    done += len(chunk)
-                    if total:
-                        self.progress_callback(done, total,
-                                               os.path.basename(save_path))
-        if total is None:
-            self.progress_callback(done, done, os.path.basename(save_path))
-        os.replace(part_path, save_path)
-        return save_path
+            done = 0
+            with open(part_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self.progress_callback(done, total,
+                                                   os.path.basename(save_path))
+            if total is None:
+                self.progress_callback(done, done, os.path.basename(save_path))
+            os.replace(part_path, save_path)
+            return save_path
+        finally:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
     def _download_with_refresh(self, fid: str, info: dict, save_path: str,
-                               expect_size: int = 0, max_retry: int = 3) -> str:
-        """下载单个文件；遇到 403/412/429（直链被拒/风控/过期）时刷新直链重试。
+                               expect_size: int = 0, max_retry: int = 2) -> str:
+        """下载单个文件；403/412/429 时丢掉分片、换新直链再试一次。
 
-        夸克 download_url 为短时效签名直链，且并发/频率过高会触发风控返回 412。
-        这里在失败时重新调用 file/download 取一条新直链再试，配合递增等待，
-        对"直链过期"和"短暂风控"都能自愈；账号级持续风控则重试后仍会抛出。
+        账号级风控不能靠狂刷直链解开，所以只重试一次并拉长间隔，避免把风控打得更死。
         """
         url = info.get("download_url")
         if not url:
@@ -634,12 +672,15 @@ class QuarkClient:
             except QuarkError as e:
                 last_err = e
                 msg = str(e)
-                # 仅对"直链被拒"类错误刷新重试；其他错误（如磁盘/网络）直接抛
                 if not any(code in msg for code in ("403", "412", "429")):
                     raise
                 if attempt >= max_retry - 1:
                     raise
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(3.0 * (attempt + 1))
+                try:
+                    os.remove(save_path + ".part")
+                except OSError:
+                    pass
                 try:
                     fresh = self.get_download_urls([fid])
                     if fresh and fresh[0].get("download_url"):

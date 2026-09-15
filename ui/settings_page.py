@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from utils.common import (
     get_base_dir,
     get_download_dir,
-    load_app_setting,
+    load_parallel_downloads,
     load_quark_cookie,
     save_app_setting,
     save_quark_cookie,
@@ -203,9 +203,6 @@ class SettingsPage(QWidget):
 
         # 同时下载的安装包路数（本体 + 前置在下载阶段全并行）
         dl_card.add_title("⚡ 下载并行数")
-        dl_card.add_text(
-            "同一批中「目标 Mod + 缺失前置」的安装包同时下载的数量。Mod 大多是很小的文件，"
-            "并发拉取能明显加快整批下载；调高占用更多带宽。", size=10)
         p_row = QHBoxLayout()
         p_row.setSpacing(10)
         p_lbl = QLabel("同时下载")
@@ -213,7 +210,7 @@ class SettingsPage(QWidget):
         p_lbl.setStyleSheet(f"color: {_COLOR_SUB}; background: transparent;")
         self.parallel_box = QSpinBox()
         self.parallel_box.setRange(1, 16)
-        self.parallel_box.setValue(8)
+        self.parallel_box.setValue(1)
         self.parallel_box.setSuffix(" 路")
         self.parallel_box.setFixedWidth(120)
         self.parallel_box.setAlignment(Qt.AlignCenter)
@@ -222,18 +219,14 @@ class SettingsPage(QWidget):
             "QSpinBox { background: #1a1a1e; color: #9ecbff; border: 1px solid #33333c;"
             " border-radius: 6px; padding: 5px 6px; }"
             "QSpinBox::up-button, QSpinBox::down-button { width: 18px; }")
-        try:
-            val = int(load_app_setting("parallel_downloads", 8) or 8)
-        except Exception:
-            val = 8
-        self.parallel_box.setValue(max(1, min(16, val)))
+        self.parallel_box.setValue(load_parallel_downloads())
         self.parallel_box.valueChanged.connect(self._on_parallel_changed)
         p_row.addWidget(p_lbl)
         p_row.addWidget(self.parallel_box)
         p_row.addStretch()
         dl_card._layout.addLayout(p_row)
         dl_card.add_text(
-            "实际生效数不会超过本次任务需要的安装包个数；调得过高若触发夸克限流，请适当调低。",
+            "默认 1 路，调高能提升速度，但容易被风控，若被风控，退出账号重新登录",
             color=_COLOR_DIM, size=9)
         body.addWidget(dl_card)
 
@@ -268,10 +261,9 @@ class SettingsPage(QWidget):
     # ---------------------------------------------------------- 业务逻辑
     def refresh_login_status(self):
         """刷新夸克登录状态：先本地判断有没有 Cookie，再起线程联网验证"""
-        if self._busy:
-            return
         cookie = load_quark_cookie()
         if not cookie:
+            self._busy = False
             self.quark_state_label.setText("尚未登录")
             self.quark_state_label.setStyleSheet(
                 f"color: {_COLOR_RED}; background: transparent;")
@@ -283,12 +275,24 @@ class SettingsPage(QWidget):
         self.quark_state_label.setText("正在验证登录状态…")
         self.quark_state_label.setStyleSheet(f"color: {_COLOR_DIM}; background: transparent;")
         self.logout_btn.setEnabled(True)
+        self._start_status_worker(cookie)
 
-        self._status_worker = _QuarkStatusWorker(cookie, self)
-        self._status_worker.done.connect(self._on_status_done)
-        self._status_worker.start()
+    def _start_status_worker(self, cookie: str):
+        """起一条新的状态校验线程；旧线程的结果一律丢弃，避免切号后被旧结果盖回去。"""
+        old = getattr(self, "_status_worker", None)
+        if old is not None:
+            try:
+                old.done.disconnect(self._on_status_done)
+            except Exception:
+                pass
+        worker = _QuarkStatusWorker(cookie, self)
+        self._status_worker = worker
+        worker.done.connect(self._on_status_done)
+        worker.start()
 
     def _on_status_done(self, ok: bool, msg: str):
+        if self.sender() is not self._status_worker:
+            return
         self._busy = False
         if ok:
             self.quark_state_label.setText(f"✅ 已登录：{msg or '夸克用户'}")
@@ -309,6 +313,7 @@ class SettingsPage(QWidget):
             from quark_login_dialog import show_quark_login_dialog
         saved = show_quark_login_dialog(self)
         if saved:
+            self._busy = False
             self._sync_status_after_change("夸克账号已登录并保存")
         return saved
 
@@ -344,3 +349,4 @@ class SettingsPage(QWidget):
     def _on_parallel_changed(self, value):
         """下载并行数变化 -> 立即写入 config.json（下次下载即生效）"""
         save_app_setting("parallel_downloads", int(value))
+        save_app_setting("parallel_downloads_user_set", True)

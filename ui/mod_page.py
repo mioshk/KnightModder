@@ -16,6 +16,7 @@ from PySide6.QtCore import (
     QItemSelection,
     QItemSelectionModel,
     QPoint,
+    QUrl,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,9 +37,14 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QProgressBar,
 )
-from PySide6.QtGui import QFont, QCursor
+from PySide6.QtGui import QFont, QCursor, QPixmap, QPainter, QDesktopServices
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
+
+try:  # 精简安装可能不带 QtSvg：图标渲染时优雅降级为文字
+    from PySide6.QtSvg import QSvgRenderer
+except Exception:
+    QSvgRenderer = None
 
 
 def get_modlog_path():
@@ -135,16 +141,62 @@ def _divider_line(color="#2e2e30"):
 
 def _make_section_header(icon, title):
     lbl = QLabel(f"{icon}  {title}")
-    lbl.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+    lbl.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
     lbl.setStyleSheet("""
         QLabel {
-            color: #a0a0a8;
+            color: #9aa3b8;
             background: transparent;
             border: none;
             padding: 0px;
+            font-size: 13px;
+            font-weight: bold;
         }
     """)
     return lbl
+
+
+def _version_badge_style(color, bg, border):
+    """版本徽章样式：普通蓝 / 待更新橙"""
+    return f"""
+        QLabel {{
+            color: {color};
+            background-color: {bg};
+            border: 1px solid {border};
+            border-radius: 11px;
+            padding: 3px 12px;
+            font-size: 12px;
+        }}
+    """
+
+
+def _render_github_icon(size=18, color="#c8c8d0"):
+    """把 GitHub mark 渲染成 QPixmap；无 QtSvg 时回退 None（调用方改用文字）。"""
+    if QSvgRenderer is None:
+        return None
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
+        'width="{size}" height="{size}">'
+        '<path fill="{color}" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59'
+        '.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94'
+        '.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82'
+        '.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95'
+        ' 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82'
+        '.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82'
+        '.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95'
+        '.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38'
+        'A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>'
+    ).format(size=size, color=color)
+    try:
+        renderer = QSvgRenderer(bytearray(svg.encode("utf-8")))
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        renderer.render(painter)
+        painter.end()
+        return pix
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -156,8 +208,8 @@ class DetailCard(QFrame):
         super().__init__(parent)
         self.setStyleSheet(_section_card_style())
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(18, 14, 18, 14)
-        self._layout.setSpacing(8)
+        self._layout.setContentsMargins(20, 16, 20, 16)
+        self._layout.setSpacing(10)
 
     def add_header(self, icon, title):
         self._layout.addWidget(_make_section_header(icon, title))
@@ -736,56 +788,67 @@ class ModDetailPanel(QWidget):
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
-        self.main_layout.setSpacing(14)
+        self.main_layout.setSpacing(16)
 
         # 标题卡片
         self.title_card = QFrame()
         self.title_card.setStyleSheet("""
             QFrame {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #1a2a1a, stop:1 #1c1c2e);
-                border: 1px solid #2a3a2a;
-                border-radius: 14px;
+                    stop:0 #242a3d, stop:1 #1a1b26);
+                border: 1px solid #353a4d;
+                border-radius: 16px;
             }
         """)
         title_layout = QVBoxLayout(self.title_card)
-        title_layout.setContentsMargins(22, 18, 22, 18)
-        title_layout.setSpacing(6)
+        title_layout.setContentsMargins(24, 20, 24, 20)
+        title_layout.setSpacing(8)
 
         title_top_row = QHBoxLayout()
-        title_top_row.setSpacing(10)
+        title_top_row.setSpacing(12)
         title_top_row.setContentsMargins(0, 0, 0, 0)
 
         self.title_en = QLabel("")
-        self.title_en.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
+        self.title_en.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
         self.title_en.setStyleSheet("""
             QLabel {
                 color: #ffffff;
                 background: transparent;
                 border: none;
                 padding: 0px;
+                font-size: 24px;
+                font-weight: bold;
             }
         """)
+        self.title_en.setWordWrap(True)
         self.title_en.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         title_top_row.addWidget(self.title_en)
 
         self.version_badge = QLabel("")
-        self.version_badge.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
-        self.version_badge.setStyleSheet("""
-            QLabel {
-                color: #007aff;
-                background-color: rgba(0, 122, 255, 0.15);
-                border: 1px solid rgba(0, 122, 255, 0.35);
-                border-radius: 10px;
-                padding: 2px 12px;
-                font-size: 12px;
-            }
-        """)
-        self.version_badge.setFixedHeight(22)
+        self.version_badge.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+        self.version_badge.setStyleSheet(
+            _version_badge_style("#7ab8ff", "rgba(0,122,255,0.16)", "rgba(0,122,255,0.38)"))
+        self.version_badge.setFixedHeight(26)
         self.version_badge.setAlignment(Qt.AlignCenter)
-        title_top_row.addWidget(self.version_badge)
+        title_top_row.addWidget(self.version_badge, 0, Qt.AlignTop)
 
         title_layout.addLayout(title_top_row)
+
+        # 中文名：作为大标题之下的次要信息
+        self.title_cn = QLabel("")
+        self.title_cn.setFont(QFont("Microsoft YaHei", 14))
+        self.title_cn.setStyleSheet("""
+            QLabel {
+                color: #a8b0c4;
+                background: transparent;
+                border: none;
+                padding: 0px;
+                font-size: 14px;
+            }
+        """)
+        self.title_cn.setWordWrap(True)
+        title_layout.addWidget(self.title_cn)
+
         self.main_layout.addWidget(self.title_card)
 
         # 状态卡片
@@ -809,19 +872,55 @@ class ModDetailPanel(QWidget):
         self.status_card.add_widget(self._wrap_in_layout_widget(status_inner))
         self.main_layout.addWidget(self.status_card)
 
+        # 原仓库卡片（GitHub 图标 + 可点击跳转，XML <Repository> 为空时隐藏）
+        self.repo_card = DetailCard()
+        repo_header = QHBoxLayout()
+        repo_header.setContentsMargins(0, 0, 0, 0)
+        repo_header.setSpacing(8)
+        self.repo_icon_lbl = QLabel()
+        self.repo_icon_lbl.setFixedSize(18, 18)
+        self.repo_icon_lbl.setAlignment(Qt.AlignCenter)
+        gh_pix = _render_github_icon(16, "#c8c8d0")
+        if gh_pix is not None:
+            self.repo_icon_lbl.setPixmap(gh_pix)
+        else:
+            self.repo_icon_lbl.setText("GitHub")
+            self.repo_icon_lbl.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+            self.repo_icon_lbl.setStyleSheet("color:#c8c8d0; background:transparent; border:none;")
+        repo_header.addWidget(self.repo_icon_lbl)
+        repo_title = QLabel("原仓库")
+        repo_title.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
+        repo_title.setStyleSheet(
+            "color:#a0a0a8; background:transparent; border:none; font-size:13px; font-weight:bold;")
+        repo_header.addWidget(repo_title)
+        repo_header.addStretch()
+        self.repo_card.add_widget(self._wrap_in_layout_widget(repo_header))
+        self.repo_card.add_divider()
+        self._repo_url = ""
+        self.repo_link_lbl = QLabel("")
+        self.repo_link_lbl.setFont(QFont("Microsoft YaHei", 12))
+        self.repo_link_lbl.setStyleSheet(
+            "QLabel { color:#5aa9ff; background:transparent; border:none; padding:0px; }")
+        self.repo_link_lbl.setCursor(QCursor(Qt.PointingHandCursor))
+        self.repo_link_lbl.setWordWrap(True)
+        self.repo_link_lbl.mousePressEvent = self._on_repo_link_clicked
+        self.repo_card.add_widget(self.repo_link_lbl)
+        self.main_layout.addWidget(self.repo_card)
+
         # 描述卡片
         self.desc_card = DetailCard()
         self.desc_card.add_header("📝", "描  述")
         self.desc_card.add_divider()
 
         self.desc_cn_lbl = QLabel("")
-        self.desc_cn_lbl.setFont(QFont("Microsoft YaHei", 13))
+        self.desc_cn_lbl.setFont(QFont("Microsoft YaHei", 15))
         self.desc_cn_lbl.setStyleSheet("""
             QLabel {
-                color: #e0e0e0;
+                color: #ececf2;
                 background: transparent;
                 border: none;
                 padding: 0px;
+                font-size: 15px;
             }
         """)
         self.desc_cn_lbl.setWordWrap(True)
@@ -829,13 +928,14 @@ class ModDetailPanel(QWidget):
         self.desc_card.add_widget(self.desc_cn_lbl)
 
         self.desc_en_lbl = QLabel("")
-        self.desc_en_lbl.setFont(QFont("Microsoft YaHei", 12))
+        self.desc_en_lbl.setFont(QFont("Microsoft YaHei", 14))
         self.desc_en_lbl.setStyleSheet("""
             QLabel {
-                color: #a0a0a8;
+                color: #9ea3b5;
                 background: transparent;
                 border: none;
                 padding: 0px;
+                font-size: 14px;
             }
         """)
         self.desc_en_lbl.setWordWrap(True)
@@ -905,14 +1005,19 @@ class ModDetailPanel(QWidget):
     def _show_empty_state(self):
         self.title_en.setText("选择一个模组")
         self.title_en.setStyleSheet("color: #555555; background: transparent; border: none;")
+        self.title_cn.setText("")
+        self.title_cn.setVisible(False)
         self.version_badge.setText("")
         self.version_badge.setVisible(False)
+        self.status_card.setVisible(True)
         self.status_label.setText("👈 点击左侧列表查看详情")
         self.status_label.setStyleSheet("color: #666666; background: transparent; border: none;")
         self._clear_status_badges()
         self.desc_card.setVisible(False)
         self.deps_card.setVisible(False)
         self.integ_card.setVisible(False)
+        self.repo_card.setVisible(False)
+        self._repo_url = ""
 
     def set_mod_info(
         self,
@@ -926,6 +1031,7 @@ class ModDetailPanel(QWidget):
         desc_en="",
         dependencies=None,
         integrations=None,
+        repository="",
         is_online_page=False,
         local_version="",
     ):
@@ -935,16 +1041,24 @@ class ModDetailPanel(QWidget):
                 background: transparent;
                 border: none;
                 padding: 0px;
+                font-size: 24px;
+                font-weight: bold;
             }
         """)
-        self.title_en.setText(f"{mod_name}（{chinese_name}）" if chinese_name else mod_name)
+        self.title_en.setText(mod_name)
+        self.title_cn.setText(chinese_name)
+        self.title_cn.setVisible(bool(chinese_name.strip()))
 
-        # 版本徽章：待更新时显示「v旧版本 → v新版本」，其它情况只显示当前版本
+        # 版本徽章：待更新时显示「v旧版本 → v新版本」并转为橙色，其它情况只显示当前版本
         if version:
             if has_update and local_version:
                 self.version_badge.setText(f"v{local_version} → v{version}")
+                self.version_badge.setStyleSheet(
+                    _version_badge_style("#ffb454", "rgba(255,149,0,0.18)", "rgba(255,149,0,0.42)"))
             else:
                 self.version_badge.setText(f"v{version}")
+                self.version_badge.setStyleSheet(
+                    _version_badge_style("#7ab8ff", "rgba(0,122,255,0.16)", "rgba(0,122,255,0.38)"))
             self.version_badge.setVisible(True)
         else:
             self.version_badge.setText("")
@@ -952,27 +1066,19 @@ class ModDetailPanel(QWidget):
 
         self._clear_status_badges()
 
-        if is_online_page:
-            if has_update:
-                self.status_label.setText("🔄 发现新版本")
-                self.status_label.setStyleSheet("color: #ff9500; background: transparent; border: none;")
-                self._add_status_badge("待更新", "#ffffff", "#ff9500")
-            elif is_installed:
-                self.status_label.setText("✅ 已安装到本地")
-                self.status_label.setStyleSheet("color: #34c759; background: transparent; border: none;")
-                self._add_status_badge("已安装", "#ffffff", "#34c759")
-            else:
-                self.status_label.setText("📥 尚未安装")
-                self.status_label.setStyleSheet("color: #ff6b6b; background: transparent; border: none;")
-                self._add_status_badge("未安装", "#ffffff", "#ff6b6b")
-        else:
+        # 在线页：「尚未安装 / 已安装到本地」在列表里已体现，整栏隐藏不再重复展示；
+        # 本地页保留「已启用 / 已禁用」状态（可据此操作启停）
+        self.status_card.setVisible(not is_online_page)
+        if not is_online_page:
             if enabled:
                 self.status_label.setText("✅ 模组已启用")
-                self.status_label.setStyleSheet("color: #34c759; background: transparent; border: none;")
+                self.status_label.setStyleSheet(
+                    "color: #34c759; background: transparent; border: none; font-size: 14px; font-weight: bold;")
                 self._add_status_badge("已启用", "#ffffff", "#34c759")
             else:
                 self.status_label.setText("⛔ 模组已禁用")
-                self.status_label.setStyleSheet("color: #ff6b6b; background: transparent; border: none;")
+                self.status_label.setStyleSheet(
+                    "color: #ff6b6b; background: transparent; border: none; font-size: 14px; font-weight: bold;")
                 self._add_status_badge("已禁用", "#ffffff", "#888888")
 
         has_desc = bool(desc_cn.strip() or desc_en.strip())
@@ -983,6 +1089,13 @@ class ModDetailPanel(QWidget):
 
         self.desc_en_lbl.setText(desc_en if desc_en.strip() else "")
         self.desc_en_lbl.setVisible(bool(desc_en.strip()))
+
+        # 原仓库：有 <Repository> 才显示，点击图标/链接跳转浏览器
+        self._repo_url = repository.strip()
+        has_repo = bool(self._repo_url)
+        self.repo_card.setVisible(has_repo)
+        self.repo_link_lbl.setText(self._repo_url if has_repo else "")
+        self.repo_link_lbl.setVisible(has_repo)
 
         deps = dependencies or []
         self.deps_card.setVisible(bool(deps))
@@ -998,8 +1111,14 @@ class ModDetailPanel(QWidget):
             integ_installed = self._dep_checker(integ_name) if self._dep_checker else False
             self.integ_list_layout.addWidget(DepItem(integ_name, integ_installed))
 
+    def _on_repo_link_clicked(self, event):
+        url = getattr(self, "_repo_url", "")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+        event.accept()
+
     def set_local_mod_info(self, mod_name, enabled, version="", mod_info=None):
-        chinese_name = desc_cn = desc_en = ""
+        chinese_name = desc_cn = desc_en = repository = ""
         deps = integ = []
         if mod_info:
             chinese_name = mod_info.get('chinese_name', '')
@@ -1007,6 +1126,7 @@ class ModDetailPanel(QWidget):
             desc_en = mod_info.get('desc_en', '')
             deps = mod_info.get('dependencies', [])
             integ = mod_info.get('integrations', [])
+            repository = mod_info.get('repository', '')
 
         self.set_mod_info(
             mod_name=mod_name,
@@ -1017,11 +1137,12 @@ class ModDetailPanel(QWidget):
             desc_en=desc_en,
             dependencies=deps,
             integrations=integ,
+            repository=repository,
             is_online_page=False,
         )
 
     def set_online_mod_info(self, mod_name, is_installed, has_update, mod_info=None, local_version=""):
-        chinese_name = version = desc_cn = desc_en = ""
+        chinese_name = version = desc_cn = desc_en = repository = ""
         deps = integ = []
         if mod_info:
             chinese_name = mod_info.get('chinese_name', '')
@@ -1030,6 +1151,7 @@ class ModDetailPanel(QWidget):
             desc_en = mod_info.get('desc_en', '')
             deps = mod_info.get('dependencies', [])
             integ = mod_info.get('integrations', [])
+            repository = mod_info.get('repository', '')
 
         self.set_mod_info(
             mod_name=mod_name,
@@ -1041,6 +1163,7 @@ class ModDetailPanel(QWidget):
             desc_en=desc_en,
             dependencies=deps,
             integrations=integ,
+            repository=repository,
             is_online_page=True,
             local_version=local_version,
         )
@@ -3067,7 +3190,7 @@ class OnlineModPage(QWidget):
             QMessageBox.warning(self, "无法下载", f"未找到模组「{mod_name}」的下载信息，请确认在线列表已加载完成。")
             return
 
-        from utils.common import load_app_setting, load_quark_cookie
+        from utils.common import load_quark_cookie
         from core.online_install import (collect_install_plan, local_ready_result,
                                          purge_local_packages)
         plan = collect_install_plan(game_path, mod_name, resolver, force=force)
@@ -3155,7 +3278,8 @@ class OnlineModPage(QWidget):
 
         # 弹出悬浮进度面板：登记本批计划（目标 + 缺失依赖）。
         # 可并行：重复点击会新增一批，各批独立线程同时下载，互不阻塞。
-        parallel = int(load_app_setting("parallel_downloads", 8) or 8)
+        from utils.common import load_parallel_downloads
+        parallel = load_parallel_downloads()
         self._batch_seq += 1
         batch_id = f"dl{self._batch_seq}"
         self._batch_results[batch_id] = (mod_name, True, "")

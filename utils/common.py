@@ -124,6 +124,18 @@ def save_app_setting(key, value) -> bool:
     return _write_config(data)
 
 
+def load_parallel_downloads() -> int:
+    """读取下载并行数。旧版本默认 8 会打出夸克 412，未手动改过的一次性降到 1。"""
+    try:
+        val = int(load_app_setting("parallel_downloads", 1) or 1)
+    except Exception:
+        val = 1
+    if val == 8 and not load_app_setting("parallel_downloads_user_set"):
+        val = 1
+        save_app_setting("parallel_downloads", 1)
+    return max(1, min(16, val))
+
+
 def normalize_path(path):
     """
     统一路径格式：

@@ -582,7 +582,7 @@ def run_install_batch(game_path: str, tasks: List[dict],
                       on_installing: Optional[Callable[[str], None]] = None,
                       task_done: Optional[Callable[[str, str], None]] = None,
                       on_status: Optional[Callable[[str], None]] = None,
-                      parallel: int = 8) -> dict:
+                      parallel: int = 1) -> dict:
     """
     两阶段执行一个任务列表（依赖在前，但下载全并行）：
       阶段一：tasks 里所有待装 zip 并发下载（同名共享依赖全局只下一次）；
@@ -593,8 +593,8 @@ def run_install_batch(game_path: str, tasks: List[dict],
     :param on_installing: 单个 Mod 进入校验/安装前回调 Mod 名
     :param task_done: 单个 Mod 完成回调 (Mod名, installed/updated/skipped)
     :param on_status: 实时阶段消息回调（解析/转存/取地址/开始下载...）
-    :param parallel: 同时下载的最大任务数（默认 8，可在「设置」里调整；
-                     超过同批次任务数时自动收敛）
+    :param parallel: 同时下载的最大任务数（默认 1，与 QuarkPanTool 一样串行，
+                     避免夸克 CDN 412；可在「设置」里调整）
     :return: {statuses: {Mod名: installed/updated/skipped}}
     :raises QuarkError: 登录/链接/校验错误；任务级错误包装「任务名：原因」后抛出。
     """
@@ -626,7 +626,7 @@ def run_install_batch(game_path: str, tasks: List[dict],
         # 登录态只探测一次（失败抛友好错误），各并发下载线程复用 cookie 字符串
         make_quark_client(log=log, status=on_status)
         cookie = load_quark_cookie()
-        workers = max(1, min(len(need_net), parallel if parallel and parallel > 0 else 8))
+        workers = max(1, min(len(need_net), parallel if parallel and parallel > 0 else 1))
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="km-dl")
         futures = {}
         try:
