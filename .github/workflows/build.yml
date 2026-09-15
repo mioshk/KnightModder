@@ -1,4 +1,4 @@
-name: Build (Windows / macOS / Linux)
+name: Build (Windows)
 
 on:
   # 只在推 tag 时构建并发布 Release；推 main 不再触发，避免产生无 Release 的冗余构建。
@@ -9,20 +9,7 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: KnightModder-Windows
-            suffix: windows
-          - os: macos-latest
-            artifact: KnightModder-macOS
-            suffix: macos
-          - os: ubuntu-latest
-            artifact: KnightModder-Linux
-            suffix: linux
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -37,56 +24,21 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Generate macOS icon (.icns)
-        if: runner.os == 'macOS'
-        run: |
-          mkdir -p assets/icon.iconset
-          sips -z 16 16     assets/icon.png --out assets/icon.iconset/icon_16x16.png
-          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_16x16@2x.png
-          sips -z 32 32     assets/icon.png --out assets/icon.iconset/icon_32x32.png
-          sips -z 64 64     assets/icon.png --out assets/icon.iconset/icon_32x32@2x.png
-          sips -z 128 128   assets/icon.png --out assets/icon.iconset/icon_128x128.png
-          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_128x128@2x.png
-          sips -z 256 256   assets/icon.png --out assets/icon.iconset/icon_256x256.png
-          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_256x256@2x.png
-          sips -z 512 512   assets/icon.png --out assets/icon.iconset/icon_512x512.png
-          sips -z 1024 1024 assets/icon.png --out assets/icon.iconset/icon_512x512@2x.png
-          iconutil -c icns assets/icon.iconset -o assets/icon.icns
-
       - name: Build single-file executable (PyInstaller)
         run: pyinstaller --noconfirm main.spec
 
-      - name: Rename artifact (Windows)
-        if: runner.os == 'Windows'
+      - name: Rename artifact
         shell: pwsh
         run: |
           $ver = $env:GITHUB_REF_NAME -replace '^v',''
           $exe = Get-Item dist\KnightModder* | Select-Object -First 1
           $ext = $exe.Extension
-          Rename-Item $exe.FullName -NewName "KnightModder-v$ver-${{ matrix.suffix }}$ext"
-
-      - name: Package artifact (macOS onedir -> zip)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          FOLDER=$(ls -d dist/KnightModder* | head -1)
-          cd dist
-          zip -r "KnightModder-v${VERSION}-macos.zip" "$(basename "$FOLDER")"
-          rm -rf "$(basename "$FOLDER")"
-
-      - name: Rename artifact (Linux onefile)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          FILE=$(ls dist/KnightModder* | head -1)
-          mv "$FILE" "dist/KnightModder-v${VERSION}-linux"
+          Rename-Item $exe.FullName -NewName "KnightModder-v$ver-windows$ext"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: KnightModder-Windows
           path: |
             dist/KnightModder*
           if-no-files-found: error
@@ -98,7 +50,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
