@@ -790,6 +790,14 @@ class DependencyResolver:
                 repo_elem = mod.find('./Repository')
                 repository = repo_elem.text.strip() if repo_elem is not None and repo_elem.text else ""
 
+                # 提取 README（可选字段）：优先中文 <ReadmeCN>，没有再退回 <Readme>。
+                # 多数小仓库其实没有 README.md，所以允许作者在 XML 里直接提供正文。
+                readme_cn_elem = mod.find('./ReadmeCN')
+                readme_cn = (readme_cn_elem.text or "").strip() if readme_cn_elem is not None else ""
+                readme_elem = mod.find('./Readme')
+                readme_en = (readme_elem.text or "").strip() if readme_elem is not None else ""
+                readme = readme_cn or readme_en
+
                 self.all_mods.add(name)
 
                 if qlink:
@@ -817,6 +825,7 @@ class DependencyResolver:
                     "desc_en": desc_en,
                     "integrations": integrations,
                     "repository": repository,
+                    "readme": readme,
                 }
                 self.mod_data.append(mod_info)
                 self.mod_data_by_name[name] = mod_info

@@ -846,7 +846,7 @@ class MainWindow(QMainWindow):
 
         left_col.addLayout(head_row)
 
-        desc = QLabel("选择你的《空洞骑士》安装路径，即可一键安装 API 与 Mod")
+        desc = QLabel("选择你的《空洞骑士》hollow_knight.exe路径，即可一键安装 API 与 Mod")
         desc.setObjectName("subtitleLabel")
         desc.setWordWrap(True)
         desc.setStyleSheet("""

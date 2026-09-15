@@ -2,6 +2,7 @@
 """模组管理页面"""
 import os
 import re
+import sys
 import time
 from typing import Callable, Optional
 from PySide6.QtCore import (
@@ -36,8 +37,13 @@ from PySide6.QtWidgets import (
     QFrame,
     QSpacerItem,
     QProgressBar,
+    QToolTip,
+    QDialog,
+    QTextBrowser,
 )
-from PySide6.QtGui import QFont, QCursor, QPixmap, QPainter, QDesktopServices
+from PySide6.QtGui import (QFont, QCursor, QPixmap, QPainter, QDesktopServices,
+                           QTextCursor, QImage)
+from urllib.parse import urljoin
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
 
@@ -169,23 +175,53 @@ def _version_badge_style(color, bg, border):
     """
 
 
-def _render_github_icon(size=18, color="#c8c8d0"):
-    """把 GitHub mark 渲染成 QPixmap；无 QtSvg 时回退 None（调用方改用文字）。"""
+# 内置矢量图标：名称 -> (viewBox, path d)。均为实心单路径，可直接填色。
+_ICON_PATHS = {
+    "github": ("0 0 16 16",
+               "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59"
+               ".4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94"
+               ".09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82"
+               ".72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95"
+               " 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82"
+               ".64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82"
+               ".44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95"
+               ".29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38"
+               "A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"),
+    "edit": ("0 0 24 24",
+             "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z"
+             "M20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 "
+             "3.75 3.75 1.83-1.83z"),
+    "folder": ("0 0 24 24",
+               "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8"
+               "c0-1.1-.9-2-2-2h-8l-2-2z"),
+    "share": ("0 0 24 24",
+              "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7"
+              "l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3"
+              "c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3"
+              "c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92"
+              "s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"),
+}
+
+# 无 QtSvg 时的退化文字
+_ICON_FALLBACK_TEXT = {"edit": "✏", "folder": "📁", "share": "🔗", "github": "GitHub"}
+
+# 动作图标悬浮提示的弹出延迟（毫秒）。
+# 不用 Qt 原生 setToolTip（默认约 1 秒才弹，太慢），改为图标自己用定时器控制；
+# 也刻意不去碰 QApplication.setStyle()——在控件构造期替换全局样式会让后续
+# 控件构造返回 NULL 直接崩溃。
+_TOOLTIP_WAKE_DELAY_MS = 120
+
+
+def _render_svg_icon(name, size=18, color="#c8c8d0"):
+    """把内置图标渲染成 QPixmap；无 QtSvg 或渲染失败时返回 None（调用方退化为文字）。"""
     if QSvgRenderer is None:
         return None
+    view_box, path_d = _ICON_PATHS[name]
     svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" '
-        'width="{size}" height="{size}">'
-        '<path fill="{color}" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59'
-        '.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94'
-        '.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82'
-        '.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95'
-        ' 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82'
-        '.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82'
-        '.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95'
-        '.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38'
-        'A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>'
-    ).format(size=size, color=color)
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}" '
+        f'width="{size}" height="{size}">'
+        f'<path fill="{color}" d="{path_d}"/></svg>'
+    )
     try:
         renderer = QSvgRenderer(bytearray(svg.encode("utf-8")))
         pix = QPixmap(size, size)
@@ -197,6 +233,188 @@ def _render_github_icon(size=18, color="#c8c8d0"):
         return pix
     except Exception:
         return None
+
+
+def _first_link(mod_info):
+    """取 Mod 的夸克分享链接：优先 <QLink>，没有则取 <QLinks> 里第一条。"""
+    if not mod_info:
+        return ""
+    link = (mod_info.get("link") or "").strip()
+    if link:
+        return link
+    for l in (mod_info.get("batch_links") or []):
+        if l and l.strip():
+            return l.strip()
+    return ""
+
+
+def find_mod_dir(game_path, mod_name):
+    """
+    找 Mod 在本地的安装目录：Mods/<名> 或 Mods/Disabled/<名>。
+
+    少数 Mod 是散装 dll（没有自己的文件夹），此时返回该 dll 所在的目录。
+    目录名与 Mod 名做归一化比较（容忍大小写/符号差异）。找不到返回 ""。
+    """
+    if not game_path or not mod_name:
+        return ""
+    try:
+        mods_dir = get_mods_dir(game_path)
+    except Exception:
+        return ""
+    if not os.path.isdir(mods_dir):
+        return ""
+
+    target = normalize_name(mod_name)
+    for base in (mods_dir, os.path.join(mods_dir, "Disabled")):
+        if not os.path.isdir(base):
+            continue
+        try:
+            for entry in os.listdir(base):
+                p = os.path.join(base, entry)
+                if os.path.isdir(p) and normalize_name(entry) == target:
+                    return p
+                # 散装 dll：Mod 名与文件名（去扩展名）一致时，打开它所在目录
+                if (os.path.isfile(p) and entry.lower().endswith(".dll")
+                        and normalize_name(os.path.splitext(entry)[0]) == target):
+                    return base
+        except OSError:
+            continue
+    return ""
+
+
+def get_mod_settings_dir():
+    """
+    Hollow Knight 的持久化数据目录：Mod 的全局设置（GlobalSettings）都写在这里。
+    即 Unity 的 Application.persistentDataPath，与 ModLog.txt 同级。
+    """
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/Team Cherry/Hollow Knight")
+    if not sys.platform.startswith("win"):
+        return os.path.expanduser("~/.config/unity3d/Team Cherry/Hollow Knight")
+    user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+    return os.path.join(user_profile, "AppData", "LocalLow", "Team Cherry", "Hollow Knight")
+
+
+_GLOBAL_SETTINGS_SUFFIX = ".GlobalSettings.json"
+
+
+def _config_name_candidates(mod_name):
+    """
+    配置文件名的候选（不含 .GlobalSettings.json 后缀）。
+
+    Mod 的显示名与设置文件名常不一致，例如：
+      ItemChanger  -> ItemChangerMod
+      SFCore       -> SFCoreMod
+      Randomizer 4 -> RandomizerMod
+    因此按「原名 / 加 Mod 后缀 / 去尾部版本号再加 Mod 后缀 / 去空格」等逐一尝试。
+    """
+    name = (mod_name or "").strip()
+    if not name:
+        return []
+    cands = [name, name + "Mod"]
+    if name.lower().endswith("mod"):
+        cands.append(name[:-3])
+    # 去掉结尾的版本号/数字：Randomizer 4 -> Randomizer
+    stripped = re.sub(r"[\s\d._-]+$", "", name).strip()
+    if stripped and stripped != name:
+        cands.append(stripped)
+        cands.append(stripped + "Mod")
+    no_space = name.replace(" ", "")
+    if no_space != name:
+        cands.append(no_space)
+        cands.append(no_space + "Mod")
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def find_mod_config_file(game_path, mod_name):
+    """
+    找 Mod 的配置文件（GlobalSettings），与 Lumafly 一致的做法。
+
+    主查位置：Hollow Knight 持久化目录下的 <Mod名>.GlobalSettings.json
+      Windows: %USERPROFILE%/AppData/LocalLow/Team Cherry/Hollow Knight/
+    匹配顺序：候选名精确命中 → 大小写不敏感命中 → 归一化比较（容忍空格/符号差异）。
+    兜底：极少数 Mod 把 json 直接放在自己的安装目录里（Mods/<名>/、含 Disabled）。
+
+    找不到返回 ""（调用方据此把编辑图标置灰）。
+    """
+    if not mod_name:
+        return ""
+
+    # 1) 持久化目录：绝大多数 Mod 的 GlobalSettings 都在这里
+    settings_dir = get_mod_settings_dir()
+    if os.path.isdir(settings_dir):
+        try:
+            files = [f for f in os.listdir(settings_dir)
+                     if f.lower().endswith(_GLOBAL_SETTINGS_SUFFIX.lower())]
+        except OSError:
+            files = []
+        stem_map = {f[:-len(_GLOBAL_SETTINGS_SUFFIX)]: os.path.join(settings_dir, f)
+                    for f in files}
+        cands = _config_name_candidates(mod_name)
+        for stem in cands:
+            if stem in stem_map:
+                return stem_map[stem]
+            low = stem.lower()
+            for k, v in stem_map.items():
+                if k.lower() == low:
+                    return v
+        targets = {normalize_name(s) for s in cands}
+        for k, v in stem_map.items():
+            if normalize_name(k) in targets:
+                return v
+
+    # 2) 兜底：Mod 安装目录内的 json
+    if not game_path:
+        return ""
+    try:
+        mods_dir = get_mods_dir(game_path)
+    except Exception:
+        return ""
+    if not os.path.isdir(mods_dir):
+        return ""
+
+    target = normalize_name(mod_name)
+    dirs = []
+    for base in (mods_dir, os.path.join(mods_dir, "Disabled")):
+        if not os.path.isdir(base):
+            continue
+        try:
+            for entry in os.listdir(base):
+                p = os.path.join(base, entry)
+                if os.path.isdir(p) and normalize_name(entry) == target:
+                    dirs.append(p)
+        except OSError:
+            continue
+
+    named = (
+        f"{mod_name}.GlobalSettings.json",
+        f"{mod_name}.json",
+        "GlobalSettings.json",
+        "Settings.json",
+        "settings.json",
+        "Config.json",
+        "config.json",
+    )
+    fallback = ""
+    for d in dirs:
+        for n in named:
+            p = os.path.join(d, n)
+            if os.path.isfile(p):
+                return p
+        # 仅当目录里恰好只有一个 .json 时才认它，避免打开无关资源文件
+        try:
+            jsons = [e for e in os.listdir(d)
+                     if e.lower().endswith(".json") and not e.startswith(".")]
+        except OSError:
+            jsons = []
+        if len(jsons) == 1:
+            fallback = fallback or os.path.join(d, jsons[0])
+    return fallback
 
 
 # ============================================================
@@ -777,6 +995,328 @@ class OnlineDownloadWorker(QThread):
         self.progress.emit(self.batch_id, task_name, pct)
 
 
+def _github_owner_repo(url):
+    """从 GitHub 仓库地址里提取 owner/repo（去掉 .git、查询串与末尾斜杠）。"""
+    if not url:
+        return ""
+    m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s#?]+)", url)
+    if not m:
+        return ""
+    owner, repo = m.group(1).strip(), m.group(2).strip()
+    if repo.lower().endswith(".git"):
+        repo = repo[:-4]
+    return f"{owner}/{repo}" if owner and repo else ""
+
+
+def fetch_readme(repo_url, timeout=8, total_budget=20, ssl_warn_callback=None):
+    """
+    拉取 Mod 仓库的 README.md，返回 (markdown 原文, base_url)。
+
+    国内可达性实测（本机「强制直连」、不走系统代理）：
+      cdn.jsdelivr.net          200  ✅  主用
+      gcore.jsdelivr.net        200  ✅  jsDelivr 备用域名
+      fastly.jsdelivr.net       失败（仅代理可用）
+      raw.githubusercontent.com 失败（证书拦截；verify=False 亦读超时）
+
+    所以把 jsDelivr 系域名全部排前面，raw.githubusercontent 仅作最后兜底
+    （对开了代理/VPN 的用户仍有效）；并用 total_budget 限制总耗时，
+    避免在国内网络下逐个超时把界面拖住。
+
+    base_url 为 README 所在目录，用于解析其中的相对图片/链接。
+    """
+    owner_repo = _github_owner_repo(repo_url)
+    fallback_base = f"https://cdn.jsdelivr.net/gh/{owner_repo}/" if owner_repo else ""
+    if not owner_repo:
+        return "", ""
+    try:
+        from utils.common import safe_requests_get
+    except Exception:
+        return "", fallback_base
+    # jsDelivr 省略版本号即取默认分支；HEAD 同理，覆盖非 main/master 的仓库
+    urls = (
+        f"https://cdn.jsdelivr.net/gh/{owner_repo}/README.md",
+        f"https://gcore.jsdelivr.net/gh/{owner_repo}/README.md",
+        f"https://fastly.jsdelivr.net/gh/{owner_repo}/README.md",
+        f"https://raw.githubusercontent.com/{owner_repo}/HEAD/README.md",
+        f"https://raw.githubusercontent.com/{owner_repo}/main/README.md",
+        f"https://raw.githubusercontent.com/{owner_repo}/master/README.md",
+    )
+    deadline = time.time() + total_budget
+    for u in urls:
+        if time.time() > deadline:
+            break
+        try:
+            r = safe_requests_get(u, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
+            if r is not None and getattr(r, "status_code", 0) == 200:
+                text = r.content.decode("utf-8", errors="replace")
+                if text.strip():
+                    return text, u.rsplit("/", 1)[0] + "/"
+        except Exception:
+            continue
+    return "", fallback_base
+
+
+# README 里两种图片写法：markdown ![](x) 与原生 HTML <img src="x">
+_MD_IMG_RE = re.compile(r"!\[[^\]]*\]\(\s*<?([^)>\s]+)", re.I)
+_HTML_IMG_RE = re.compile(r"""<img[^>]*\bsrc\s*=\s*["']([^"']+)["']""", re.I)
+# 整行只有一个 <img> 标签
+_IMG_LINE_RE = re.compile(r"<img\b[^>]*/?>", re.I)
+
+
+def _isolate_image_lines(markdown):
+    """
+    让独占一行的 <img> 单独成段。
+
+    README 里整行写 <img> 时，markdown 会把它并进上一段，图片便跟在正文后面、
+    被顶到行尾；再叠加 README 里写死的 width="800"（如 ToggleableBindings），
+    宽图就会被挤出可视区，只能看到（也只能点到）右半张。这里给它前后补空行，
+    使其独占一段、从左边距开始排版。
+    """
+    if not markdown:
+        return markdown
+    out = []
+    for line in markdown.splitlines():
+        s = line.strip()
+        if s and _IMG_LINE_RE.fullmatch(s):
+            out.extend(("", s, ""))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _collect_remote_images(markdown, base_url):
+    """收集 README 中的远程图片 URL（相对路径按 base_url 解析），去重保序。"""
+    if not markdown:
+        return []
+    found = _MD_IMG_RE.findall(markdown) + _HTML_IMG_RE.findall(markdown)
+    out, seen = [], set()
+    for u in found:
+        u = (u or "").strip().strip("<>")
+        if not u or u.lower().startswith("data:"):
+            continue
+        abs_u = urljoin(base_url, u) if base_url else u
+        if not abs_u.lower().startswith(("http://", "https://")):
+            continue
+        if abs_u not in seen:
+            seen.add(abs_u)
+            out.append(abs_u)
+    return out
+
+
+def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
+    """
+    预下载 README 里的**原图**，返回 {url: QImage}（失败的跳过，不影响正文）。
+
+    必须在后台线程调用。原因：Qt 的 QTextBrowser 自己**不会下载 http(s) 图片**，
+    loadResource 对网络图片一律返回空，于是带 width 的 <img> 会预留出一大块空白/
+    乱码区域。改为渲染前把图备好，交给 _ReadmeBrowser 从缓存直接取，
+    既修好显示，也避免在绘制过程中联网卡住界面。
+
+    这里保留原图不缩放：内联显示时的缩窄由 _ReadmeBrowser 懒处理，
+    点击图片预览时才能看到真正的原始尺寸。
+    """
+    result = {}
+    if not urls:
+        return result
+    try:
+        from utils.common import safe_requests_get
+    except Exception:
+        return result
+    for u in urls:
+        try:
+            r = safe_requests_get(u, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
+            if r is None or getattr(r, "status_code", 0) != 200:
+                continue
+            img = QImage()
+            if not img.loadFromData(r.content) or img.isNull():
+                continue
+            result[u] = img
+        except Exception:
+            continue
+    return result
+
+
+def show_image_preview(parent, image):
+    """以原尺寸展示图片（超出屏幕可视区时等比缩小以便完整查看），点击关闭。"""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("图片预览 — %d × %d" % (image.width(), image.height()))
+    dlg.setStyleSheet("QDialog { background-color: #1a1a1a; }")
+
+    pix = QPixmap.fromImage(image)
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        avail = screen.availableGeometry()
+        max_w, max_h = int(avail.width() * 0.92), int(avail.height() * 0.92)
+        if pix.width() > max_w or pix.height() > max_h:
+            pix = pix.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(0, 0, 0, 0)
+    lbl = QLabel()
+    lbl.setAlignment(Qt.AlignCenter)
+    lbl.setStyleSheet("background: #1a1a1a;")
+    lbl.setPixmap(pix)
+    lbl.setCursor(QCursor(Qt.PointingHandCursor))
+    lbl.mousePressEvent = lambda e: dlg.close()
+    layout.addWidget(lbl)
+
+    dlg.resize(pix.size())
+    dlg.exec()
+
+
+class _ReadmeBrowser(QTextBrowser):
+    """
+    能显示网络图片的 QTextBrowser：
+      - QTextBrowser 自带的 loadResource 只认 qrc/本地文件，对 http(s) 一律返回空，
+        README 里的网络图片会渲染成空白/乱块，所以改用预下载好的缓存；
+      - 点击图片会以原尺寸弹出预览（图片被链接包裹时仍走原链接）；
+      - 内联显示按需缩窄并缓存，避免每次重绘都重新缩放。
+    """
+
+    def __init__(self, images=None, parent=None):
+        super().__init__(parent)
+        self._images = images or {}   # 原图（点击预览用）
+        self._scaled = {}             # 内联用的缩略图（懒缓存，按宽度失效）
+
+    def loadResource(self, type_, url):
+        if url.isValid():
+            key = url.toString()
+            img = self._images.get(key)
+            if img is not None:
+                # 按当前可视宽度限制：README 里常写死 width="800"，
+                # 直接照搬会把图撑到视口外、只剩半张可点。
+                limit = max(200, self.viewport().width() - 24)
+                cached = self._scaled.get(key)
+                if cached is None or cached[0] != limit:
+                    scaled = (img.scaledToWidth(limit, Qt.SmoothTransformation)
+                              if img.width() > limit else img)
+                    cached = (limit, scaled)
+                    self._scaled[key] = cached
+                return cached[1]
+        return super().loadResource(type_, url)
+
+    def _image_at(self, pos):
+        """
+        返回该位置下的图片 URL；不在图片上、或图片被链接包裹时返回 ''。
+
+        用 documentLayout().hitTest() 而不是 cursorForPosition()：后者在大图上
+        吸附行为不准，实测只能命中图片右半边，左半边点不中。
+        """
+        try:
+            if self.anchorAt(pos):
+                return ""
+            # 视口坐标 -> 文档坐标
+            p = pos + QPoint(self.horizontalScrollBar().value(),
+                             self.verticalScrollBar().value())
+            charpos = self.document().documentLayout().hitTest(p, Qt.ExactHit)
+            if charpos < 0:
+                return ""
+            cur = QTextCursor(self.document())
+            cur.setPosition(charpos + 1)
+            fmt = cur.charFormat()
+            if fmt.isImageFormat():
+                return fmt.toImageFormat().name()
+        except Exception:
+            pass
+        return ""
+
+    def mouseMoveEvent(self, e):
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        if self._image_at(pos):
+            self.viewport().setCursor(QCursor(Qt.PointingHandCursor))
+        else:
+            self.viewport().unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        url = self._image_at(pos) if e.button() == Qt.LeftButton else ""
+        if url:
+            img = self._images.get(url)
+            if img is not None and not img.isNull():
+                show_image_preview(self, img)
+                e.accept()
+                return
+        super().mouseReleaseEvent(e)
+
+
+class _ReadmeWorker(QThread):
+    """后台拉取 README 及其配图：网络请求不能卡住 UI 主线程。"""
+
+    done = Signal(str, object, str, str)  # (markdown, {url: QImage}, base_url, 错误信息)
+
+    def __init__(self, repo_url, parent=None):
+        super().__init__(parent)
+        self.repo_url = repo_url or ""
+
+    def run(self):
+        try:
+            text, base = fetch_readme(self.repo_url)
+        except Exception as e:
+            self.done.emit("", {}, "", f"获取 README 失败：{e}")
+            return
+        if not text:
+            self.done.emit(
+                "", {}, base,
+                "未能获取 README：该仓库可能没有 README.md，或当前网络无法访问 GitHub。")
+            return
+        try:
+            images = fetch_readme_images(_collect_remote_images(text, base))
+        except Exception:
+            images = {}
+        self.done.emit(text, images, base, "")
+
+
+def show_readme_dialog(parent, title, markdown, images=None, base_url=""):
+    """展示 README 弹窗（markdown 渲染；配图走预下载缓存）。内容由调用方提前取好。"""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(f"README — {title}")
+    dlg.resize(800, 600)
+    dlg.setStyleSheet("QDialog { background-color: #1a1a1a; }")
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setSpacing(10)
+
+    browser = _ReadmeBrowser(images)
+    browser.setOpenExternalLinks(True)
+    browser.setStyleSheet("""
+        QTextBrowser {
+            background-color: #1e1e22;
+            color: #d8d8e0;
+            border: 1px solid #33333c;
+            border-radius: 8px;
+            padding: 14px;
+            font-size: 13px;
+        }
+    """)
+    browser.setMarkdown(_isolate_image_lines(markdown))
+    if base_url:
+        # 让 README 里的相对图片/链接能解析到仓库目录（需在 setMarkdown 之后设置）
+        browser.document().setBaseUrl(QUrl(base_url))
+    browser.moveCursor(QTextCursor.Start)
+    layout.addWidget(browser, stretch=1)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    close_btn = QPushButton("关闭")
+    close_btn.setFixedSize(100, 34)
+    close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+    close_btn.setStyleSheet("""
+        QPushButton {
+            background: #2a2a32; color: #d8d8e0;
+            border: 1px solid #3a3a44; border-radius: 8px;
+            font-size: 13px; font-weight: bold;
+        }
+        QPushButton:hover { background: #34343e; }
+    """)
+    close_btn.clicked.connect(dlg.accept)
+    btn_row.addWidget(close_btn)
+    layout.addLayout(btn_row)
+
+    dlg.exec()
+
+
 # ============================================================
 # 详情面板
 # ============================================================
@@ -789,6 +1329,17 @@ class ModDetailPanel(QWidget):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(16)
+
+        # Mod 名右下角的动作图标（打开文件夹 / 编辑配置 / 复制夸克链接）
+        self._game_path = ""
+        self._config_path = ""
+        self._mod_dir = ""
+        self._qlink = ""
+        self._deps = []
+        self._mod_name = ""
+        self._readme_text = ""
+        self._readme_worker = None
+        self._link_provider: Optional[Callable[[str], str]] = None
 
         # 标题卡片
         self.title_card = QFrame()
@@ -847,7 +1398,19 @@ class ModDetailPanel(QWidget):
             }
         """)
         self.title_cn.setWordWrap(True)
-        title_layout.addWidget(self.title_cn)
+
+        # 中文名同行右侧放三个动作图标（即 Mod 名的右下角）
+        title_bottom_row = QHBoxLayout()
+        title_bottom_row.setSpacing(10)
+        title_bottom_row.setContentsMargins(0, 0, 0, 0)
+        title_bottom_row.addWidget(self.title_cn, stretch=1)
+        self.folder_lbl = self._make_action_icon(self._on_folder_icon_clicked)
+        self.config_edit_lbl = self._make_action_icon(self._on_config_icon_clicked)
+        self.share_lbl = self._make_action_icon(self._on_share_icon_clicked)
+        title_bottom_row.addWidget(self.folder_lbl, 0, Qt.AlignBottom)
+        title_bottom_row.addWidget(self.config_edit_lbl, 0, Qt.AlignBottom)
+        title_bottom_row.addWidget(self.share_lbl, 0, Qt.AlignBottom)
+        title_layout.addLayout(title_bottom_row)
 
         self.main_layout.addWidget(self.title_card)
 
@@ -880,7 +1443,7 @@ class ModDetailPanel(QWidget):
         self.repo_icon_lbl = QLabel()
         self.repo_icon_lbl.setFixedSize(18, 18)
         self.repo_icon_lbl.setAlignment(Qt.AlignCenter)
-        gh_pix = _render_github_icon(16, "#c8c8d0")
+        gh_pix = _render_svg_icon("github", 16, "#c8c8d0")
         if gh_pix is not None:
             self.repo_icon_lbl.setPixmap(gh_pix)
         else:
@@ -894,6 +1457,29 @@ class ModDetailPanel(QWidget):
             "color:#a0a0a8; background:transparent; border:none; font-size:13px; font-weight:bold;")
         repo_header.addWidget(repo_title)
         repo_header.addStretch()
+
+        # README 按钮：拉取该仓库的 README.md 并在弹窗中展示
+        self.readme_btn = QPushButton("📖 README")
+        self.readme_btn.setFixedHeight(24)
+        self.readme_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self.readme_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(122,184,255,0.12);
+                color: #7ab8ff;
+                border: 1px solid rgba(122,184,255,0.35);
+                border-radius: 6px;
+                padding: 0px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: rgba(122,184,255,0.24); }
+            QPushButton:disabled {
+                color: #4f4f5c; border-color: #33333c; background: transparent;
+            }
+        """)
+        self.readme_btn.clicked.connect(self._on_readme_clicked)
+        repo_header.addWidget(self.readme_btn)
+
         self.repo_card.add_widget(self._wrap_in_layout_widget(repo_header))
         self.repo_card.add_divider()
         self._repo_url = ""
@@ -1007,6 +1593,13 @@ class ModDetailPanel(QWidget):
         self.title_en.setStyleSheet("color: #555555; background: transparent; border: none;")
         self.title_cn.setText("")
         self.title_cn.setVisible(False)
+        self._config_path = ""
+        self._mod_dir = ""
+        self._qlink = ""
+        self._deps = []
+        self.config_edit_lbl.setVisible(False)
+        self.folder_lbl.setVisible(False)
+        self.share_lbl.setVisible(False)
         self.version_badge.setText("")
         self.version_badge.setVisible(False)
         self.status_card.setVisible(True)
@@ -1032,6 +1625,9 @@ class ModDetailPanel(QWidget):
         dependencies=None,
         integrations=None,
         repository="",
+        readme="",
+        qlink="",
+        game_path="",
         is_online_page=False,
         local_version="",
     ):
@@ -1045,9 +1641,18 @@ class ModDetailPanel(QWidget):
                 font-weight: bold;
             }
         """)
+        self._mod_name = mod_name
         self.title_en.setText(mod_name)
         self.title_cn.setText(chinese_name)
         self.title_cn.setVisible(bool(chinese_name.strip()))
+
+        # 右下角动作图标：各自按可用性置灰（配置 / 本地目录 / 夸克链接）
+        self._game_path = game_path or getattr(self, "_game_path", "")
+        self._mod_dir = find_mod_dir(self._game_path, mod_name)
+        self._config_path = find_mod_config_file(self._game_path, mod_name)
+        self._qlink = (qlink or "").strip()
+        self._deps = dependencies or []
+        self._refresh_action_icons()
 
         # 版本徽章：待更新时显示「v旧版本 → v新版本」并转为橙色，其它情况只显示当前版本
         if version:
@@ -1090,6 +1695,9 @@ class ModDetailPanel(QWidget):
         self.desc_en_lbl.setText(desc_en if desc_en.strip() else "")
         self.desc_en_lbl.setVisible(bool(desc_en.strip()))
 
+        # README：XML 自带的优先；为空时按钮会退而去仓库拉 README.md
+        self._readme_text = readme or ""
+
         # 原仓库：有 <Repository> 才显示，点击图标/链接跳转浏览器
         self._repo_url = repository.strip()
         has_repo = bool(self._repo_url)
@@ -1117,8 +1725,147 @@ class ModDetailPanel(QWidget):
             QDesktopServices.openUrl(QUrl(url))
         event.accept()
 
-    def set_local_mod_info(self, mod_name, enabled, version="", mod_info=None):
-        chinese_name = desc_cn = desc_en = repository = ""
+    def _make_action_icon(self, slot):
+        """
+        统一的动作图标：20x20、透明底、默认隐藏、点击走 slot。
+
+        悬浮提示自己控制：进入后等 _TOOLTIP_WAKE_DELAY_MS 就弹出，离开立即收起。
+        """
+        lbl = QLabel("")
+        lbl.setFixedSize(20, 20)
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet("background: transparent; border: none;")
+        lbl.setVisible(False)
+        lbl.mousePressEvent = slot
+        lbl._tip_text = ""
+        lbl._tip_timer = QTimer(lbl)
+        lbl._tip_timer.setSingleShot(True)
+        lbl._tip_timer.setInterval(_TOOLTIP_WAKE_DELAY_MS)
+        lbl._tip_timer.timeout.connect(lambda: self._show_icon_tip(lbl))
+        lbl.enterEvent = lambda e: lbl._tip_timer.start()
+        lbl.leaveEvent = lambda e: (lbl._tip_timer.stop(), QToolTip.hideText())
+        return lbl
+
+    def _show_icon_tip(self, lbl):
+        """定时器到点：在鼠标位置弹出该图标的说明。"""
+        text = getattr(lbl, "_tip_text", "")
+        if text:
+            QToolTip.showText(QCursor.pos(), text, lbl)
+
+    def _set_action_icon(self, lbl, icon_name, enabled, tooltip):
+        """设置一个动作图标的状态：可用=蓝色+手型光标，不可用=灰色+箭头光标。"""
+        pix = _render_svg_icon(icon_name, 16, "#7ab8ff" if enabled else "#4f4f5c")
+        if pix is not None:
+            lbl.setPixmap(pix)
+        else:  # 无 QtSvg 时退化为文字
+            lbl.setText(_ICON_FALLBACK_TEXT.get(icon_name, "•"))
+            lbl.setStyleSheet(
+                f"color: {'#7ab8ff' if enabled else '#4f4f5c'};"
+                "background: transparent; border: none;")
+        lbl.setVisible(True)
+        lbl.setCursor(QCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor))
+        lbl._tip_text = tooltip   # 由 _make_action_icon 的定时器弹出，不用原生 setToolTip
+
+    def _refresh_action_icons(self):
+        """刷新右下角三个动作图标：编辑配置 / 打开文件夹 / 复制夸克链接。"""
+        has_cfg = bool(self._config_path)
+        self._set_action_icon(
+            self.config_edit_lbl, "edit", has_cfg,
+            f"编辑配置文件\n{self._config_path}" if has_cfg
+            else "该 Mod 没有配置文件（GlobalSettings）")
+
+        has_dir = bool(self._mod_dir) and os.path.isdir(self._mod_dir)
+        self._set_action_icon(
+            self.folder_lbl, "folder", has_dir,
+            f"打开该 Mod 的本地文件夹\n{self._mod_dir}" if has_dir
+            else "该 Mod 未安装到本地")
+
+        has_link = bool(self._qlink)
+        dep_n = len(self._deps)
+        if has_link:
+            extra = f"（本 Mod + {dep_n} 个前置依赖）" if dep_n else ""
+            share_tip = f"复制夸克分享链接{extra}"
+        else:
+            share_tip = "该 Mod 没有配置夸克链接"
+        self._set_action_icon(self.share_lbl, "share", has_link, share_tip)
+
+    def _on_config_icon_clicked(self, event):
+        path = getattr(self, "_config_path", "")
+        if path and os.path.isfile(path):
+            # 用系统默认程序打开；没有关联程序时退化为打开所在目录
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
+        event.accept()
+
+    def _on_folder_icon_clicked(self, event):
+        d = getattr(self, "_mod_dir", "")
+        if d and os.path.isdir(d):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(d))
+        event.accept()
+
+    def _on_readme_clicked(self, _checked=False):
+        """README：优先用 XML 自带的 <Readme>；没有则后台去仓库拉 README.md。"""
+        if self._readme_worker is not None:
+            return
+        text = getattr(self, "_readme_text", "")
+        if text:
+            show_readme_dialog(self, self._mod_name, text)
+            return
+        # 注：走网络时下面会用 _ReadmeWorker 预下载配图后再弹窗
+        url = getattr(self, "_repo_url", "")
+        if not url:
+            QMessageBox.information(self, "README", "该 Mod 没有 README，也未配置仓库地址")
+            return
+        self.readme_btn.setEnabled(False)
+        QToolTip.showText(QCursor.pos(), "正在加载 README…", self.readme_btn)
+        self._readme_worker = _ReadmeWorker(url, self)
+        self._readme_worker.done.connect(self._on_readme_loaded)
+        self._readme_worker.start()
+
+    def _on_readme_loaded(self, text, images, base_url, err):
+        """README 拉取完成：恢复按钮并弹窗展示（或提示失败原因）。"""
+        worker = self._readme_worker
+        self._readme_worker = None
+        try:
+            self.readme_btn.setEnabled(True)
+            QToolTip.hideText()
+            if text:
+                show_readme_dialog(self, self._mod_name, text, images, base_url)
+            else:
+                QMessageBox.information(self, "README", err or "未能获取该 Mod 的 README")
+        finally:
+            if worker is not None:
+                try:
+                    worker.deleteLater()
+                except RuntimeError:
+                    pass
+
+    def _on_share_icon_clicked(self, event):
+        """复制「本 Mod + 全部前置依赖」的夸克链接，每行一条。"""
+        links = []
+        own = getattr(self, "_qlink", "")
+        if own:
+            links.append(own)
+        provider = getattr(self, "_link_provider", None)
+        if provider:
+            for dep in (getattr(self, "_deps", None) or []):
+                try:
+                    l = (provider(dep) or "").strip()
+                except Exception:
+                    l = ""
+                if l and l not in links:
+                    links.append(l)
+        if links:
+            QApplication.clipboard().setText("\n".join(links))
+            n = len(links)
+            QToolTip.showText(
+                QCursor.pos(),
+                f"已复制 {n} 条夸克链接" + ("（含前置依赖）" if n > 1 else ""),
+                self.share_lbl)
+        event.accept()
+
+    def set_local_mod_info(self, mod_name, enabled, version="", mod_info=None, game_path=""):
+        chinese_name = desc_cn = desc_en = repository = qlink = readme = ""
         deps = integ = []
         if mod_info:
             chinese_name = mod_info.get('chinese_name', '')
@@ -1127,6 +1874,8 @@ class ModDetailPanel(QWidget):
             deps = mod_info.get('dependencies', [])
             integ = mod_info.get('integrations', [])
             repository = mod_info.get('repository', '')
+            readme = mod_info.get('readme', '')
+            qlink = _first_link(mod_info)
 
         self.set_mod_info(
             mod_name=mod_name,
@@ -1138,11 +1887,15 @@ class ModDetailPanel(QWidget):
             dependencies=deps,
             integrations=integ,
             repository=repository,
+            readme=readme,
+            qlink=qlink,
+            game_path=game_path,
             is_online_page=False,
         )
 
-    def set_online_mod_info(self, mod_name, is_installed, has_update, mod_info=None, local_version=""):
-        chinese_name = version = desc_cn = desc_en = repository = ""
+    def set_online_mod_info(self, mod_name, is_installed, has_update, mod_info=None,
+                            local_version="", game_path=""):
+        chinese_name = version = desc_cn = desc_en = repository = qlink = readme = ""
         deps = integ = []
         if mod_info:
             chinese_name = mod_info.get('chinese_name', '')
@@ -1152,6 +1905,8 @@ class ModDetailPanel(QWidget):
             deps = mod_info.get('dependencies', [])
             integ = mod_info.get('integrations', [])
             repository = mod_info.get('repository', '')
+            readme = mod_info.get('readme', '')
+            qlink = _first_link(mod_info)
 
         self.set_mod_info(
             mod_name=mod_name,
@@ -1164,8 +1919,11 @@ class ModDetailPanel(QWidget):
             dependencies=deps,
             integrations=integ,
             repository=repository,
+            readme=readme,
+            qlink=qlink,
             is_online_page=True,
             local_version=local_version,
+            game_path=game_path,
         )
 
 
@@ -2418,17 +3176,20 @@ class ModPage(QWidget):
                 version_from_modlog = get_mod_version_from_metadata(game_path, mod_name) or ""
 
             mod_info = None
-            if self.parent and hasattr(self.parent, 'resolver'):
-                resolver = self.parent.resolver
-                if hasattr(resolver, 'mod_data_by_name'):
-                    mod_info = resolver.mod_data_by_name.get(mod_name)
+            resolver = getattr(self.parent, 'resolver', None) if self.parent else None
+            if resolver and hasattr(resolver, 'mod_data_by_name'):
+                mod_info = resolver.mod_data_by_name.get(mod_name)
 
-            self.detail_scroll.detail_panel._dep_checker = lambda n: self._is_mod_installed(n)
-            self.detail_scroll.detail_panel.set_local_mod_info(
+            _panel = self.detail_scroll.detail_panel
+            _panel._dep_checker = lambda n: self._is_mod_installed(n)
+            _mdb = getattr(resolver, 'mod_data_by_name', None) or {}
+            _panel._link_provider = lambda n: _first_link(_mdb.get(n) or {})
+            _panel.set_local_mod_info(
                 mod_name=mod_name,
                 enabled=enabled,
                 version=version_from_modlog,
                 mod_info=mod_info,
+                game_path=game_path,
             )
 
         except RuntimeError:
@@ -3097,27 +3858,29 @@ class OnlineModPage(QWidget):
                     break
 
             mod_info = None
-            if self.parent and hasattr(self.parent, 'resolver'):
-                resolver = self.parent.resolver
-                if hasattr(resolver, 'mod_data_by_name'):
-                    mod_info = resolver.mod_data_by_name.get(mod_name)
+            resolver = getattr(self.parent, 'resolver', None) if self.parent else None
+            if resolver and hasattr(resolver, 'mod_data_by_name'):
+                mod_info = resolver.mod_data_by_name.get(mod_name)
 
             # 在线页读取本地已安装版本（用于显示 v旧→v新 格式）。
             # 来源改为 .metadata.json 的 version 字段，不再依赖 ModLog。
             local_version = ""
-            if is_installed:
-                game_path = getattr(self.parent, 'game_path', '') if self.parent else ''
-                if game_path:
-                    from core.installer import get_mod_version_from_metadata
-                    local_version = get_mod_version_from_metadata(game_path, mod_name) or ""
+            game_path = getattr(self.parent, 'game_path', '') if self.parent else ''
+            if is_installed and game_path:
+                from core.installer import get_mod_version_from_metadata
+                local_version = get_mod_version_from_metadata(game_path, mod_name) or ""
 
-            self.detail_scroll.detail_panel._dep_checker = lambda n: self._is_mod_installed(n)
-            self.detail_scroll.detail_panel.set_online_mod_info(
+            _panel = self.detail_scroll.detail_panel
+            _panel._dep_checker = lambda n: self._is_mod_installed(n)
+            _mdb = getattr(resolver, 'mod_data_by_name', None) or {}
+            _panel._link_provider = lambda n: _first_link(_mdb.get(n) or {})
+            _panel.set_online_mod_info(
                 mod_name=mod_name,
                 is_installed=is_installed,
                 has_update=has_update,
                 mod_info=mod_info,
                 local_version=local_version,
+                game_path=game_path,
             )
 
         except RuntimeError:
