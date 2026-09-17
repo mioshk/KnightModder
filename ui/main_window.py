@@ -1216,6 +1216,7 @@ class MainWindow(QMainWindow):
             return 'hollow' in n and 'knight' in n
 
         # ① psutil 枚举（跨平台，覆盖当前用户进程）
+        psutil_enumerated = False
         try:
             import psutil  # 延迟导入，避免拖慢启动
             for proc in psutil.process_iter(['pid', 'name']):
@@ -1224,10 +1225,18 @@ class MainWindow(QMainWindow):
                         return proc
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
+            # 完整枚举完毕且没有命中：进程确实没在跑。
+            # 注意「没找到」≠「psutil 失败」，此时不能再去兜底 spawn tasklist——
+            # 本函数是每秒被调用的（monitor_timer），常态下每次都会多花约 0.14s
+            # 起一个子进程，把主线程周期性卡住。
+            psutil_enumerated = True
         except Exception as e:
             self._log(f"进程检测(psutil)异常: {e}", "error")
 
-        # ② tasklist 兜底（仅 Windows：可列出其他会话/用户进程，补 psutil 漏检）
+        if psutil_enumerated:
+            return None
+
+        # ② tasklist 兜底（仅 psutil 不可用/枚举失败时；Windows 同样可列出其他会话）
         if sys.platform == "win32":
             try:
                 out = subprocess.run(
