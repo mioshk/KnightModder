@@ -7,7 +7,8 @@
     dist/KnightModder v<版本> 安装版.exe     <-- 分发给用户这一个文件
 
 流程：
-    1) 用 KM_ONEDIR=1 跑 main.spec，得到主程序目录 dist/KnightModder v<版本>/
+    1) 用 KM_ONEDIR=1 跑 main.spec，得到主程序目录 dist/KnightModder/
+       （里面的 exe 固定叫 KnightModder.exe，不带版本号）
     2) 把该目录压成 build/payload.zip
     3) 用 installer.spec 把 installer.py + payload.zip 打成一个单文件安装器
 
@@ -27,7 +28,10 @@ sys.path.insert(0, ROOT)
 import config  # noqa: E402
 
 VER = getattr(config, "APP_VERSION", "1.0.0")
-PROGRAM_DIR = os.path.join(ROOT, "dist", f"KnightModder v{VER}")
+# 目录名不带版本号：这里只是构建中间产物，最终装到用户机器上的 exe 固定叫
+# KnightModder.exe（见 main.spec 的 EXE_NAME）——带版本的话每次升级文件名都变，
+# 用户上次安装建好的快捷方式就会指向不存在的旧 exe。
+PROGRAM_DIR = os.path.join(ROOT, "dist", "KnightModder")
 # 用 tar.xz 而不是 zip：solid 压缩能跨文件消除重复模式（几百个 Qt DLL 之间
 # 有大量相似段），同样算法下比逐文件压缩小得多。实测 zip(deflate) 压出 128 MB，
 # tar.xz(preset=1) 能压到 90 MB 上下，用户下载量直接少三成。

@@ -142,7 +142,15 @@ def extract_payload(payload, dest, on_progress=None):
 
 
 def find_exe(dest):
-    """在安装目录里找到主程序 exe"""
+    """在安装目录里找到主程序 exe。
+
+    主程序固定叫 KnightModder.exe（不带版本号，见 main.spec 的 EXE_NAME）。
+    这里先做精确匹配：升级时若上一版的 exe 因被占用没删干净而残留在目录里，
+    模糊匹配可能把快捷方式指到那个旧文件上。
+    """
+    exact = os.path.join(dest, APP_NAME + ".exe")
+    if os.path.isfile(exact):
+        return exact
     for name in os.listdir(dest):
         if name.lower().endswith(".exe") and APP_NAME.lower() in name.lower():
             return os.path.join(dest, name)

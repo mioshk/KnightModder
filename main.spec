@@ -14,7 +14,13 @@ while len(_ver_parts) < 4:
 _filevers = tuple(_ver_parts[:4])
 
 APP_NAME = 'KnightModder'
-EXE_NAME = f'{APP_NAME} v{_ver_str}'
+
+# KM_ONEDIR=1 表示正在为「安装版」构建程序目录（见 build_installer.py）。
+# 这种模式下 exe 必须固定叫 KnightModder.exe：文件名一旦跟着版本号走，用户
+# 每升级一版，上次安装建好的桌面/开始菜单快捷方式就全指向上一版那个已经不
+# 存在的 exe 名了。绿色单文件版仍然保留版本号，方便一眼认出是哪个版本。
+_ONEDIR = os.environ.get('KM_ONEDIR') == '1'
+EXE_NAME = APP_NAME if _ONEDIR else f'{APP_NAME} v{_ver_str}'
 
 # ---------- 与本项目无关的第三方包（禁止打进 bundle）----------
 # 打包环境的 Python 里装了很多其它项目的依赖（scipy/pandas/cryptography/
@@ -213,8 +219,6 @@ else:
     # KM_ONEDIR=1：产出「目录版」（exe + _internal 文件夹），供安装器打包成
     # 「安装版」。与 onefile 的区别是运行时不必把整个 bundle 解压到 %TEMP%，
     # 直接从安装目录加载，冷启动能省掉约 2 秒的解压时间。
-    _ONEDIR = os.environ.get('KM_ONEDIR') == '1'
-
     exe = EXE(
         pyz,
         a.scripts,
