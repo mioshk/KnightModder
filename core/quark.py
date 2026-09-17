@@ -67,6 +67,24 @@ def cookie_login_identity(header: str) -> tuple:
         pairs[k] = v
     return pairs.get("__pus", ""), pairs.get("__puus", "")
 
+
+def same_login_account(header_a: str, header_b: str) -> bool:
+    """两份 Cookie 是否属于同一个夸克账号。
+
+    只看 __pus（稳定的账号标识）。__puus / ctoken 是**轮换中**的会话令牌——每次
+    访问网盘服务端都会下发新值（这也是本机 beacon），用它判"是不是同一个号"会把
+    同一账号误判成新号，也会把"页面还停在旧号"漏判成"已切换账号"。
+    """
+    def _pus(header: str) -> str:
+        for part in (header or "").split(";"):
+            part = part.strip()
+            if part.startswith("__pus="):
+                return part.split("=", 1)[1]
+        return ""
+    a, b = _pus(header_a), _pus(header_b)
+    return bool(a) and a == b
+
+
 # ---------------- cookie 存取 ----------------
 
 def _timestamp13() -> int:
@@ -79,6 +97,21 @@ def _random_dt() -> int:
 
 class QuarkError(Exception):
     """夸克接口/网络异常（错误消息已经过友好化处理）。"""
+
+
+class QuarkCDNRejected(QuarkError):
+    """CDN 直链被拒（412/403/429）。
+
+    绝大多数情况来自「登录会话令牌过期」：夸克的 __puus / ctoken 会轮换，客户端若
+    长期持有配置里存着的老令牌，虽然 /account/info 仍照常返回登录态，但据此生成的
+    下载直链会被 CDN 直接判废（drive CDN 回 412 Precondition Failed，OSS 回 403
+    require login [auth expired]）。处理办法是 refresh_session_cookie() 换新令牌后
+    重取直链，而不是让用户换账号 / 改并行数。
+    """
+
+    def __init__(self, status: int, message: str = ""):
+        self.status = status
+        super().__init__(message or f"夸克 CDN 拒绝下载（HTTP {status}）")
 
 
 class QuarkClient:
@@ -96,6 +129,14 @@ class QuarkClient:
     # 下载文件时使用的 UA
     DL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
              "(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0")
+
+    # 登录会话刷新接口：夸克会在这些接口的响应里以 Set-Cookie 下发轮换后的新令牌。
+    # /clouddrive/config 轮换 __puus，/account 轮换 ctoken；两者都会让直链重新有效。
+    _REFRESH_APIS = (
+        ("https://drive-pc.quark.cn/1/clouddrive/config",
+         {"pr": "ucpro", "fr": "pc", "uc_param_str": ""}),
+        ("https://pan.quark.cn/account", {}),
+    )
 
     def __init__(self, cookie_str: str = "", cookie_path: str = "",
                  progress_callback=None, status_callback=None,
@@ -131,6 +172,11 @@ class QuarkClient:
         self.is_logged_in = self.check_login() if verify_login else True
         # 云端管理根目录（KnightModder）fid 缓存：整个客户端生命周期只创建一次
         self._cloud_root_cache: dict = {}
+        # 登录令牌刷新标记：每个客户端实例只主动刷新一次。主客户端（会验证登录态的
+        # 那个）顺带把新令牌写回 config.json，供后续进程/并发线程复用。
+        self._session_refreshed = False
+        if verify_login and self.is_logged_in:
+            self._ensure_fresh_session(persist=True)
 
     # ---------------- cookie 工具 ----------------
 
@@ -221,6 +267,74 @@ class QuarkClient:
             return data.get("nickname", "")
         except Exception:
             return ""
+
+    # ---------------- 登录会话令牌刷新 ----------------
+
+    def refresh_session_cookie(self, persist: bool = False) -> bool:
+        """向服务端换取轮换后的新登录令牌（__puus / ctoken），合并进当前 Cookie。
+
+        为什么必须做这一步：夸克的登录令牌会轮换，config.json 里长期不动的旧令牌仍
+        能让 /account/info 返回正常登录态，却会让据此生成的下载直链全部失效——drive
+        CDN 回「412 Precondition Failed」，OSS 回「403 require login [auth expired]」，
+        表现为"所有分享链接均不可用"。换新令牌后重取直链即可正常下载。
+
+        :return: Cookie 是否真的发生了变化
+        """
+        updated = {}
+        for api, params in self._REFRESH_APIS:
+            try:
+                r = self.session.get(api, params=params, headers=self.base_headers,
+                                     timeout=self.timeout)
+            except Exception:  # noqa: BLE001 单个刷新接口失败不影响其它
+                continue
+            raw_headers = getattr(getattr(r, "raw", None), "headers", None)
+            getlist = getattr(raw_headers, "getlist", None)
+            if not getlist:
+                continue
+            for sc in getlist("Set-Cookie"):
+                kv = (sc or "").split(";")[0].strip()
+                if "=" not in kv:
+                    continue
+                name, val = kv.split("=", 1)
+                # 空值通常是删除指令，忽略，避免把有效令牌抹掉
+                if name and val:
+                    updated[name] = val
+        if not updated:
+            return False
+
+        pairs = {}
+        for part in self.cookies.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                pairs[k] = v
+        if all(pairs.get(k) == v for k, v in updated.items()):
+            return False
+        pairs.update(updated)
+        self.cookies = "; ".join(f"{k}={v}" for k, v in pairs.items())
+        self.base_headers["cookie"] = self.cookies
+        if persist:
+            self._persist_cookie()
+        self.status_callback("已刷新夸克登录会话令牌", "info")
+        return True
+
+    def _persist_cookie(self) -> bool:
+        """把刷新后的 Cookie 写回 config.json（写失败不影响调用方）"""
+        try:
+            from utils.common import save_quark_cookie
+            return save_quark_cookie(self.cookies)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _ensure_fresh_session(self, force: bool = False, persist: bool = False) -> bool:
+        """每个客户端实例默认只刷新一次；force=True 用于失败重试时强制换新令牌。"""
+        if not force and self._session_refreshed:
+            return False
+        self._session_refreshed = True
+        try:
+            return self.refresh_session_cookie(persist=persist)
+        except Exception:  # noqa: BLE001
+            return False
 
     # ---------------- 分享链接解析 ----------------
 
@@ -628,9 +742,9 @@ class QuarkClient:
             r = sess.get(url, headers=headers, stream=True, timeout=self.timeout)
             if r.status_code not in (200, 206):
                 if r.status_code in (403, 412, 429):
-                    raise QuarkError(
-                        f"下载失败（HTTP {r.status_code}，夸克直链被拒/风控）："
-                        f"请切换夸克账号后重试，或把下载并行数调到 1")
+                    # 直链被拒基本都是登录令牌过期导致，交给上层刷新令牌后重取直链，
+                    # 而不是让用户去换账号或调并行数。
+                    raise QuarkCDNRejected(r.status_code)
                 raise QuarkError(f"下载失败（HTTP {r.status_code}）")
 
             total = None
@@ -658,9 +772,12 @@ class QuarkClient:
 
     def _download_with_refresh(self, fid: str, info: dict, save_path: str,
                                expect_size: int = 0, max_retry: int = 2) -> str:
-        """下载单个文件；403/412/429 时丢掉分片、换新直链再试一次。
+        """下载单个文件；被 CDN 拒绝时刷新登录令牌、换新直链再试一次。
 
-        账号级风控不能靠狂刷直链解开，所以只重试一次并拉长间隔，避免把风控打得更死。
+        关键点：CDN 拒绝（412/403/429）绝大多数不是"分享失效"也不是"并发太高"，
+        而是生成这条直链所用的登录令牌已经过期——同一个直链重试多少次都会被拒。
+        所以重试前先 _ensure_fresh_session(force=True) 换新令牌，再重新向 API 取
+        一条新直链。只有换新令牌后仍被拒，才认定为账号风控并向上抛出。
         """
         url = info.get("download_url")
         if not url:
@@ -672,7 +789,8 @@ class QuarkClient:
             except QuarkError as e:
                 last_err = e
                 msg = str(e)
-                if not any(code in msg for code in ("403", "412", "429")):
+                if not (isinstance(e, QuarkCDNRejected)
+                        or any(code in msg for code in ("403", "412", "429"))):
                     raise
                 if attempt >= max_retry - 1:
                     raise
@@ -681,6 +799,8 @@ class QuarkClient:
                     os.remove(save_path + ".part")
                 except OSError:
                     pass
+                # 换新令牌：这一步是整个重试的关键，缺了它只会白刷同一条废直链
+                self._ensure_fresh_session(force=True)
                 try:
                     fresh = self.get_download_urls([fid])
                     if fresh and fresh[0].get("download_url"):
@@ -713,6 +833,9 @@ class QuarkClient:
         """
         if not self.is_logged_in:
             raise QuarkError("夸克未登录或登录已过期，请先登录夸克账号")
+
+        # 用轮换后的新令牌取直链：旧令牌会让后面所有直链直接被 CDN 判废（412/403）
+        self._ensure_fresh_session()
 
         pwd_id, auto_pwd = self.parse_share_url(url)
         passcode = passcode or auto_pwd

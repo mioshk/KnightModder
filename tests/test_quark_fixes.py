@@ -27,6 +27,84 @@ class CookieIdentityTests(unittest.TestCase):
         self.assertNotEqual(cookie_login_identity(a), cookie_login_identity(b))
 
 
+    def test_identity_ignores_rotating_session_token(self):
+        """__puus/ctoken 会被服务端轮换，换完仍是同一个账号。"""
+        from core.quark import same_login_account
+        a = "__pus=aaa; __puus=bbb; ctoken=111"
+        a_rotated = "__pus=aaa; __puus=zzz; ctoken=999"
+        other = "__pus=ccc; __puus=bbb"
+        self.assertTrue(same_login_account(a, a_rotated))
+        self.assertFalse(same_login_account(a, other))
+        self.assertFalse(same_login_account("", a))
+        self.assertFalse(same_login_account("__puus=bbb", "__puus=bbb"))
+
+
+class SessionRefreshTests(unittest.TestCase):
+    def test_refresh_merges_set_cookie_and_updates_header(self):
+        from core.quark import QuarkClient
+
+        class _RawHeaders:
+            @staticmethod
+            def getlist(name):  # noqa: ARG004
+                return ["__puus=NEWVALUE; Max-Age=604800; Domain=.quark.cn; Path=/",
+                        "ctoken=NEWCT; Path=/",
+                        "deleted=; Max-Age=0; Path=/"]
+
+        class _Resp:
+            raw = type("R", (), {"headers": _RawHeaders})()
+
+        client = QuarkClient(cookie_str="__pus=a; __puus=OLD; ctoken=OLDC",
+                             verify_login=False)
+        client._session_refreshed = False
+        with mock.patch.object(client.session, "get", return_value=_Resp()):
+            changed = client.refresh_session_cookie(persist=False)
+
+        self.assertTrue(changed)
+        self.assertIn("__puus=NEWVALUE", client.cookies)
+        self.assertNotIn("__puus=OLD", client.cookies)
+        self.assertIn("ctoken=NEWCT", client.cookies)
+        self.assertIn("__pus=a", client.cookies)
+        # 空值 = 删除指令，不能写进来
+        self.assertNotIn("deleted", client.cookies)
+        # base_headers 必须同步，否则后续请求还在用旧令牌
+        self.assertEqual(client.base_headers["cookie"], client.cookies)
+
+    def test_refresh_noop_when_nothing_new(self):
+        from core.quark import QuarkClient
+
+        class _RawHeaders:
+            @staticmethod
+            def getlist(name):  # noqa: ARG004
+                return []
+
+        class _Resp:
+            raw = type("R", (), {"headers": _RawHeaders})()
+
+        client = QuarkClient(cookie_str="__pus=a; __puus=OLD", verify_login=False)
+        with mock.patch.object(client.session, "get", return_value=_Resp()):
+            self.assertFalse(client.refresh_session_cookie(persist=False))
+
+    def test_ensure_fresh_session_only_once(self):
+        from core.quark import QuarkClient
+        client = QuarkClient(cookie_str="__pus=a; __puus=OLD", verify_login=False)
+        # __init__ 里对 verify_login=True 的客户端已刷过一次，这里重置模拟未刷新
+        client._session_refreshed = False
+        calls = []
+        with mock.patch.object(client, "refresh_session_cookie",
+                               side_effect=lambda **kw: calls.append(kw) or True):
+            self.assertTrue(client._ensure_fresh_session())
+            self.assertFalse(client._ensure_fresh_session())   # 第二次直接跳过
+            self.assertTrue(client._ensure_fresh_session(force=True))
+        self.assertEqual(len(calls), 2)
+
+    def test_cdn_rejection_is_typed(self):
+        from core.quark import QuarkCDNRejected, QuarkError
+        e = QuarkCDNRejected(412)
+        self.assertIsInstance(e, QuarkError)
+        self.assertEqual(e.status, 412)
+        self.assertIn("412", str(e))
+
+
 class DownloadRequestTests(unittest.TestCase):
     def test_cdn_download_has_no_range_and_uses_own_session(self):
         path = os.path.join(ROOT, "core", "quark.py")

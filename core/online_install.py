@@ -33,7 +33,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Callable
 
-from core.quark import QuarkClient, QuarkError
+from core.quark import QuarkClient, QuarkCDNRejected, QuarkError
 from core.install_manager import (calc_file_sha256, install_zip,
                                   sanitize_mod_name, verify_zip_sha256)
 from core.installer import load_metadata, update_mod_metadata
@@ -499,6 +499,7 @@ def _download_and_verify(cookie: str, game_path: str, mod_info: dict,
     def _fetch(force_transfer: bool):
         """按候选链接顺序尝试下载一次，返回安装包路径"""
         last = ""
+        last_exc = None
         for link in link_candidates:
             try:
                 _, downloaded = client.download_share(
@@ -514,7 +515,14 @@ def _download_and_verify(cookie: str, game_path: str, mod_info: dict,
                 return _pick_package(downloaded, mod_info)
             except QuarkError as e:
                 last = str(e)
+                last_exc = e
                 log(f"⚠️ 链接 {link} 不可用，尝试下一个：{last}", "warn")
+        # CDN 直链被拒：已在 quark 内核里自动刷新过登录令牌仍是失败，
+        # 说明不是"令牌过期"这种自愈问题，提示用户重新登录。
+        if isinstance(last_exc, QuarkCDNRejected):
+            raise QuarkError(
+                f"{name} 下载被夸克 CDN 拒绝（HTTP {last_exc.status}）："
+                f"账号可能已被风控或登录已失效，请在「设置 → 夸克账号」重新登录后再试")
         raise QuarkError(
             f"{name} 所有分享链接均不可用（{last}），请检查分享是否失效或到官网获取新地址")
 

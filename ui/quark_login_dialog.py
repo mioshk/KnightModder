@@ -271,17 +271,20 @@ class QuarkLoginDialog(QDialog):
         return bool(self._cookies.get("__pus")) and bool(self._cookies.get("__puus"))
 
     def _is_same_saved_account(self, header: str) -> bool:
-        """当前捕获的登录态是否就是 config.json 里已经保存的那个号。"""
+        """当前捕获的登录态是否就是 config.json 里已经保存的那个号。
+
+        只比对账号标识 __pus：__puus/ctoken 是每次访问网盘都会被服务端轮换的会话
+        令牌（下载前就必须主动换新，否则直链全是 412），不能用它们判身份。
+        """
         try:
-            from core.quark import cookie_login_identity
+            from core.quark import same_login_account
             from utils.common import load_quark_cookie
             saved = load_quark_cookie()
         except Exception:
             return False
         if not saved:
             return False
-        ident = cookie_login_identity(header)
-        return bool(ident[0]) and ident == cookie_login_identity(saved)
+        return same_login_account(header, saved)
 
     # ---------- 状态 ----------
     def _set_state(self, text, color=_COLOR_TEXT_DIM):
