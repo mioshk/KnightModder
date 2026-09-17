@@ -1,28 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-夸克网盘内嵌登录对话框。
+夸克网盘登录（系统浏览器内核版）。
 
 实现方式：
-  1. 用 QtWebEngine 在软件内打开 https://pan.quark.cn/（夸克官方登录页），
-     用户可直接扫码登录（夸克App扫二维码）或使用手机号/账号密码登录，全程在软件内完成；
-  2. 登录成功后 WebEngine 的 CookieStore 会捕获到 __pus / __puus 等关键 Cookie，
-     对话框自动用 account/info 接口联网验证有效性，通过后保存到 config.json 并自动关闭；
-  3. 验证未自动触发成功时，可点「完成登录」手动提交当前已捕获的 Cookie；
-  4. 若当前环境缺少 QtWebEngine，或用户希望沿用旧方式，对话框内保留
-     「手动粘贴 Cookie」作为回退入口。
+  1. 点击登录后弹出一个独立的浏览器窗口，打开 https://pan.quark.cn/ 官方登录页，
+     用户扫码（夸克 App）或用手机号/账密登录，全程不需要离开本软件；
+  2. 登录成功后从窗口里读回 Cookie（走 WebView2 官方的 Cookie 管理器，
+     HttpOnly 的登录令牌 __pus / __puus 也读得到），自动用 account/info 接口
+     联网验证，通过后写入 config.json 并关闭窗口；
+  3. 若当前系统没有可用的浏览器内核，或用户中途关闭窗口，回退到「手动粘贴 Cookie」。
+
+为什么不再用 QtWebEngine：
+  QtWebEngine 等于把一整个 Chromium 塞进安装包（195 MB），占了软件体积的七成。
+  改用系统自带的 Edge 内核（WebView2）后体验完全一样，体积却能从 ~305 MB 降到
+  ~95 MB。实测 WebView2 的 CookieManager 能读回 HttpOnly 的登录令牌，所以登录
+  功能不受影响。
 """
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal, QThread, QUrl
-from PySide6.QtGui import QFont
-from PySide6.QtNetwork import QNetworkCookie
-from PySide6.QtWidgets import (
-    QDialog,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-)
+from PySide6.QtWidgets import QMessageBox
 
 # 样式常量（与 dialogs.py 深色系保持一致）
 _COLOR_BG = "#1e1e1e"
@@ -35,392 +31,190 @@ _COLOR_WARN = "#ff9800"
 
 QUARK_HOME_URL = "https://pan.quark.cn/"
 
-try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-
-    _WEBENGINE_AVAILABLE = True
-except Exception:  # noqa: BLE001 —— 个别精简安装缺 QtWebEngine
-    _WEBENGINE_AVAILABLE = False
+# 登录窗口最长等待时间（秒）；超时或用户关闭窗口都算未完成
+_LOGIN_TIMEOUT = 900
+# 轮询间隔（秒）
+_POLL_INTERVAL = 1.2
 
 
-def _as_str(value) -> str:
-    """把 bytes/QByteArray/str 统一成 str（QNetworkCookie 属性返回 QByteArray）"""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore")
-    # QByteArray 包装对象 -> bytes -> str
+def webview_available() -> bool:
+    """系统是否具备可用的浏览器内核（延迟导入，启动阶段不加载）"""
     try:
-        raw = bytes(value)
+        import webview  # noqa: F401
+        return True
     except Exception:  # noqa: BLE001
-        return ""
-    return raw.decode("utf-8", errors="ignore")
+        return False
 
 
-class _CookieVerifyWorker(QThread):
-    """后台线程：用 account/info 接口验证一段夸克 Cookie 头是否有效"""
+def _cookies_to_header(cookies) -> str:
+    """把 WebView2 读回的 Cookie 拼成 Cookie 请求头。
 
-    done = Signal(bool, str)
+    pywebview 的 get_cookies() 返回一串 http.cookies.SimpleCookie（每个内含一条
+    Set-Cookie 的完整结构），这里只挑夸克域下的 name=value。
+    """
+    from core.quark import is_quark_cookie_domain
 
-    def __init__(self, cookie_header: str, parent=None):
-        super().__init__(parent)
-        self.cookie_header = cookie_header
-
-    def run(self):
+    pairs = {}
+    for cookie in cookies or []:
         try:
-            from core.online_install import verify_cookie
-            ok, msg = verify_cookie(self.cookie_header)
-            self.done.emit(bool(ok), str(msg or ""))
-        except Exception as e:  # noqa: BLE001
-            self.done.emit(False, f"验证失败：{e}")
-
-
-class QuarkLoginDialog(QDialog):
-    """内嵌夸克官方登录页；登录成功后自动保存 Cookie 并关闭"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("夸克网盘登录")
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
-        self.setFixedSize(780, 700)
-        self.setStyleSheet(f"background-color: {_COLOR_BG};")
-
-        # ---------- 捕获到的 Cookie（name -> value） ----------
-        self._cookies: dict = {}
-        self._profile = None
-        self._view = None
-        self._checking = False
-        self._last_checked_header = ""
-        self._verify_worker = None
-
-        self._build_ui()
-        self._start_webview()
-
-        # 轮询：关键 Cookie 出现即自动联网验证
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._tick)
-        self._timer.start(700)
-
-    # ---------- UI ----------
-    def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(10)
-
-        title = QLabel("🔑 登录夸克网盘")
-        title.setFont(QFont("Microsoft YaHei", 15, QFont.Bold))
-        title.setStyleSheet(f"color: {_COLOR_TEXT}; background: transparent;")
-        layout.addWidget(title)
-
-        tip = QLabel(
-            "在下方官方登录页中完成登录：推荐用夸克App「扫一扫」扫码，也可切换手机号/账密登录。\n"
-            "切换账号时请先在页面里退出当前账号，再登录新账号；成功后本窗口会自动保存并关闭。"
-        )
-        tip.setFont(QFont("Microsoft YaHei", 10))
-        tip.setStyleSheet(f"color: {_COLOR_TEXT_SUB}; background: transparent;")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
-
-        # 状态提示条（验证中 / 成功 / 失败原因）
-        self._state_label = QLabel("等待登录...")
-        self._state_label.setMinimumHeight(20)
-        self._state_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self._state_label.setStyleSheet(
-            f"color: {_COLOR_TEXT_DIM}; background: transparent;")
-        layout.addWidget(self._state_label)
-
-        # 内嵌浏览器
-        self._browser_container = QVBoxLayout()
-        self._browser_container.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self._browser_container, stretch=1)
-
-        # 底部按钮
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(10)
-
-        manual_btn = QPushButton("手动粘贴 Cookie（备选）")
-        manual_btn.setStyleSheet(self._btn_style(primary=False))
-        manual_btn.clicked.connect(self._open_manual_dialog)
-        btn_row.addWidget(manual_btn)
-
-        reload_btn = QPushButton("刷新登录页")
-        reload_btn.setStyleSheet(self._btn_style(primary=False))
-        reload_btn.clicked.connect(lambda: self._load_home())
-        btn_row.addWidget(reload_btn)
-
-        btn_row.addStretch()
-
-        self._finish_btn = QPushButton("✅ 完成登录")
-        self._finish_btn.setStyleSheet(self._btn_style(primary=True))
-        self._finish_btn.setEnabled(False)
-        self._finish_btn.clicked.connect(self._manual_finish)
-        btn_row.addWidget(self._finish_btn)
-
-        cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(self._btn_style(primary=False))
-        cancel_btn.clicked.connect(self.reject)
-        btn_row.addWidget(cancel_btn)
-
-        layout.addLayout(btn_row)
-
-    @staticmethod
-    def _btn_style(primary: bool) -> str:
-        if primary:
-            return """
-                QPushButton {
-                    background-color: #34c759; color: white; border: none;
-                    border-radius: 15px; padding: 7px 18px; font-weight: 700;
-                }
-                QPushButton:hover { background-color: #28a745; }
-                QPushButton:disabled {
-                    background-color: #2c2c2c; color: #666666;
-                }
-            """
-        return """
-            QPushButton {
-                background-color: #2e2e2e; color: #cccccc;
-                border: 1px solid #555555; border-radius: 15px;
-                padding: 7px 14px; font-weight: 700;
-            }
-            QPushButton:hover { background-color: #3a3a3a; color: #ffffff; }
-        """
-
-    # ---------- WebEngine ----------
-    def _start_webview(self):
-        if not _WEBENGINE_AVAILABLE:
-            self._set_state("当前环境缺少 QtWebEngine，请使用「手动粘贴 Cookie」登录。",
-                            _COLOR_WARN)
-            return
-        # 无参构造 = 离屏、不落盘。命名 Profile 会把旧账号写到磁盘，
-        # 「切换账号」打开登录页时会直接带着上一次会话，看起来像没换成功。
-        self._profile = QWebEngineProfile(self)
-        try:
-            self._profile.setPersistentCookiesPolicy(
-                QWebEngineProfile.NoPersistentCookies)
-        except Exception:
-            pass
-        store = self._profile.cookieStore()
-        try:
-            store.deleteAllCookies()
-        except Exception:
-            pass
-        store.cookieAdded.connect(self._on_cookie_added)
-        try:
-            store.cookieRemoved.connect(self._on_cookie_removed)
-        except Exception:
-            pass
-
-        self._view = QWebEngineView(self)
-        page = QWebEnginePage(self._profile, self._view)
-        self._view.setPage(page)
-        self._view.loadFinished.connect(self._on_load_finished)
-        self._browser_container.addWidget(self._view)
-        self._load_home()
-
-    def _load_home(self):
-        if self._view:
-            self._view.load(QUrl(QUARK_HOME_URL))
-
-    def _on_load_finished(self, _ok: bool):
-        """页面加载完后把已有 Cookie 再广播一遍，避免只靠 cookieAdded 漏捕获。"""
-        try:
-            if self._profile is not None:
-                self._profile.cookieStore().loadAllCookies()
-        except Exception:
-            pass
-
-    @staticmethod
-    def _is_quark_cookie_domain(domain: str) -> bool:
-        from core.quark import is_quark_cookie_domain
-        return is_quark_cookie_domain(domain)
-
-    # ---------- Cookie 捕获 ----------
-    def _on_cookie_added(self, cookie: QNetworkCookie):
-        try:
-            domain = _as_str(cookie.domain())
-            name = _as_str(cookie.name())
-            value = _as_str(cookie.value())
-            if not name or not value:
-                return
-            if not self._is_quark_cookie_domain(domain):
-                return
-            self._cookies[name] = value
-            if len(self._cookies) > 80:  # 防御性上限
-                self._cookies = dict(list(self._cookies.items())[-80:])
-            if "__pus" in self._cookies and "__puus" in self._cookies:
-                if not self._finish_btn.isEnabled():
-                    self._finish_btn.setEnabled(True)
-        except Exception:
-            pass
-
-    def _on_cookie_removed(self, cookie: QNetworkCookie):
-        try:
-            name = _as_str(cookie.name())
-            if name:
-                self._cookies.pop(name, None)
-        except Exception:
-            pass
-
-    def _cookie_header(self) -> str:
-        return "; ".join(f"{k}={v}" for k, v in self._cookies.items())
-
-    def _has_key_cookies(self) -> bool:
-        return bool(self._cookies.get("__pus")) and bool(self._cookies.get("__puus"))
-
-    def _is_same_saved_account(self, header: str) -> bool:
-        """当前捕获的登录态是否就是 config.json 里已经保存的那个号。
-
-        只比对账号标识 __pus：__puus/ctoken 是每次访问网盘都会被服务端轮换的会话
-        令牌（下载前就必须主动换新，否则直链全是 412），不能用它们判身份。
-        """
-        try:
-            from core.quark import same_login_account
-            from utils.common import load_quark_cookie
-            saved = load_quark_cookie()
-        except Exception:
-            return False
-        if not saved:
-            return False
-        return same_login_account(header, saved)
-
-    # ---------- 状态 ----------
-    def _set_state(self, text, color=_COLOR_TEXT_DIM):
-        self._state_label.setText(text)
-        self._state_label.setStyleSheet(
-            f"color: {color}; background: transparent;")
-
-    # ---------- 自动 / 手动验证 ----------
-    def _tick(self):
-        """轮询：检测到关键 Cookie 且内容有变化时自动发起验证（失败会冷却重试）"""
-        # Qt WebEngine 更新同名 Cookie 时经常不发 cookieAdded，只发一次。
-        # 切号后 __pus 值已经变了，内存里还是旧值，必须主动 loadAllCookies 再广播。
-        try:
-            if self._profile is not None:
-                self._profile.cookieStore().loadAllCookies()
-        except Exception:
-            pass
-        if not self._has_key_cookies():
-            return
-        if self._checking:
-            return
-        header = self._cookie_header()
-        if header == self._last_checked_header:
-            return  # 内容没变说明还没真正登录成功，等登录页刷新 Cookie
-        if self._is_same_saved_account(header):
-            # 切换账号时如果页面还停在旧号，绝不能自动把旧 Cookie 再写回去
-            self._last_checked_header = header
-            self._set_state("仍是当前账号。请先在页面中退出，再登录要切换的新账号。",
-                            _COLOR_WARN)
-            if self._has_key_cookies():
-                self._finish_btn.setEnabled(True)
-            return
-        self._start_verify(header, auto=True)
-
-    def _manual_finish(self):
-        if not self._has_key_cookies():
-            self._set_state("还没捕获到有效登录态，请在页面里完成登录后再点这里。",
-                            _COLOR_WARN)
-            return
-        header = self._cookie_header()
-        if self._is_same_saved_account(header):
-            self._set_state("仍是当前账号。请先在页面中退出当前账号，再登录新账号。",
-                            _COLOR_WARN)
-            return
-        self._start_verify(header, auto=False)
-
-    def _start_verify(self, header: str, auto: bool):
-        self._checking = True
-        self._last_checked_header = header
-        self._set_state("正在验证登录状态，请稍候...", _COLOR_TEXT_DIM)
-        self._finish_btn.setEnabled(False)
-
-        self._verify_worker = _CookieVerifyWorker(header, self)
-        self._verify_worker.done.connect(
-            lambda ok, msg, h=header: self._on_verify_done(ok, msg, h))
-        self._verify_worker.start()
-
-    def _on_verify_done(self, ok: bool, msg: str, header: str):
-        self._checking = False
-        if ok:
-            # 验证通过 -> 保存并自动关闭
+            items = dict(cookie).items()
+        except Exception:  # noqa: BLE001
+            continue
+        for name, morsel in items:
+            # 注意：Morsel 是 dict 子类，domain 是"字典项"而不是属性，
+            # 用 getattr 永远取不到（会静默让域名过滤失效），必须走 .get()
             try:
-                from utils.common import save_quark_cookie
-                save_quark_cookie(header)
-            except Exception as e:  # noqa: BLE001
-                self._set_state(f"验证通过但保存失败：{e}", _COLOR_RED)
-                self._finish_btn.setEnabled(True)
+                domain = str(morsel.get("domain", "") or "")
+            except Exception:  # noqa: BLE001
+                domain = ""
+            if not is_quark_cookie_domain(domain):
+                continue
+            value = getattr(morsel, "value", None)
+            if value is None:
+                value = getattr(morsel, "coded_value", "")
+            value = str(value).strip('"')
+            if name and value:
+                pairs[str(name)] = value
+    return "; ".join(f"{k}={v}" for k, v in pairs.items())
+
+
+def _has_key_cookies(header: str) -> bool:
+    """登录态的两个关键令牌都在，才算登录完成"""
+    return "__pus=" in header and "__puus=" in header
+
+
+def is_same_saved_account(header: str) -> bool:
+    """当前读到的登录态是否就是 config.json 里已经保存的那个号。
+
+    只比对账号标识 __pus：__puus/ctoken 是每次访问网盘都会被服务端轮换的会话
+    令牌（下载前必须主动换新，否则直链全是 412），不能用来判身份。
+    """
+    try:
+        from core.quark import same_login_account
+        from utils.common import load_quark_cookie
+        saved = load_quark_cookie()
+    except Exception:  # noqa: BLE001
+        return False
+    if not saved:
+        return False
+    return same_login_account(header, saved)
+
+
+def _verify(header: str):
+    """联网验证一段 Cookie 头是否有效 -> (是否成功, 昵称或原因)"""
+    try:
+        from core.online_install import verify_cookie
+        ok, msg = verify_cookie(header)
+        return bool(ok), str(msg or "")
+    except Exception as e:  # noqa: BLE001
+        return False, f"验证失败：{e}"
+
+
+def _evaluate_cookies(cookies, last_header):
+    """检查一次读到的 Cookie，返回 (是否已登录成功, 当前 header, 昵称或原因)。
+
+    单独抽成函数是便于测试：轮询里的任何异常都发生在 pywebview 的回调线程里，
+    界面上完全看不到（表现就是"登录完了窗口却不关"），必须靠单测兜住。
+    """
+    header = _cookies_to_header(cookies)
+    if not header or header == last_header:
+        return False, (header or last_header), ""
+    if not _has_key_cookies(header):
+        return False, header, ""
+    ok, msg = _verify(header)
+    return bool(ok), header, msg
+
+
+def run_webview_login(url: str = QUARK_HOME_URL, timeout: int = _LOGIN_TIMEOUT) -> dict:
+    """弹出浏览器窗口让用户登录，返回 {"ok": bool, "header": str, "msg": str}。
+
+    说明：webview.start() 会阻塞调用线程直到窗口关闭，所以本函数必须在主线程
+    调用（此时 Qt 的登录对话框尚未弹出，界面不会被卡住）。
+    """
+    import webview
+
+    state = {"ok": False, "header": "", "msg": "", "error": ""}
+    win = webview.create_window(
+        "登录夸克网盘 —— 登录成功后本窗口会自动关闭", url, width=1020, height=780)
+
+    def _poll(w):
+        # 注意：last_header 必须是本函数的局部变量。若放到外层作用域，
+        # 这里的赋值会把它变成局部变量、而赋值前又被读取，抛 UnboundLocalError
+        # ——异常发生在 pywebview 的回调线程里，界面上看不到任何提示，只会表现为
+        # "登录成功了但窗口死活不关"。
+        last = ""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(_POLL_INTERVAL)
+            try:
+                cookies = w.get_cookies()
+            except Exception:  # noqa: BLE001 窗口正在导航时可能取不到
+                continue
+            try:
+                done, header, msg = _evaluate_cookies(cookies, last)
+            except Exception as e:  # noqa: BLE001 单次检查失败不能中断整个轮询
+                state["error"] = f"检查 Cookie 时出错：{e}"
+                continue
+            last = header
+            if done:
+                state.update({"ok": True, "header": header, "msg": msg})
+                try:
+                    w.destroy()
+                except Exception:  # noqa: BLE001
+                    pass
                 return
-            self._set_state(f"✅ 登录成功（{msg}），Cookie 已保存", _COLOR_ACCENT)
-            QTimer.singleShot(400, self.accept)
-            return
 
-        # 失败：可能是登录流程还没走完 / 账号异常 / 网络问题
-        self._set_state(
-            f"❌ 登录未通过：{msg or 'Cookie 无效'}。\n"
-            "如果页面尚未登录成功，请继续在页面中完成登录，本窗口会自动重试；"
-            "也可以稍后点「完成登录」。",
-            _COLOR_RED,
-        )
-        # 内容不变时不再自动轰炸；用户重新登录产生新 Cookie 后会自动再验
-        if self._has_key_cookies():
-            self._finish_btn.setEnabled(True)
+    try:
+        # private_mode=True：Cookie 不落盘，保证每次打开都是干净的登录页，
+        # 不会出现「想切号却还停在旧账号」的情况
+        webview.start(_poll, win, gui="edgechromium", private_mode=True)
+    except Exception as e:  # noqa: BLE001 系统缺 WebView2 运行时等
+        state["error"] = str(e)
+    return state
 
-    # ---------- 手动回退 ----------
-    def _open_manual_dialog(self):
-        """沿用旧的手动粘贴对话框（保留作备选路径）"""
-        try:
-            from ui.dialogs import show_quark_cookie_dialog
-        except ImportError:
-            from dialogs import show_quark_cookie_dialog
-        saved = show_quark_cookie_dialog(self)
-        if saved:
-            self._set_state("✅ 手动粘贴的 Cookie 已保存", _COLOR_ACCENT)
-            QTimer.singleShot(300, self.accept)
 
-    # ---------- 收尾 ----------
-    def closeEvent(self, event):
-        try:
-            self._timer.stop()
-        except Exception:
-            pass
-        try:
-            if self._verify_worker is not None:
-                self._verify_worker.wait(1500)
-        except Exception:
-            pass
-        # 释放 WebEngine，避免关闭后残留 GPU/渲染进程
-        try:
-            if self._view is not None:
-                layout = self._view.parentWidget()
-                if layout is not None:
-                    self._browser_container.removeWidget(self._view)
-                self._view.setPage(None)
-                self._view.deleteLater()
-                self._view = None
-        except Exception:
-            pass
-        try:
-            if self._profile is not None:
-                self._profile.deleteLater()
-                self._profile = None
-        except Exception:
-            pass
-        super().closeEvent(event)
+def _open_manual_dialog(parent=None) -> bool:
+    """回退路径：手动粘贴 Cookie"""
+    try:
+        from ui.dialogs import show_quark_cookie_dialog
+    except ImportError:
+        from dialogs import show_quark_cookie_dialog
+    return bool(show_quark_cookie_dialog(parent))
 
 
 def show_quark_login_dialog(parent=None) -> bool:
     """
-    打开夸克内嵌登录对话框（扫码 / 账密 / 手机号）。
+    打开夸克登录窗口（扫码 / 手机号 / 账密）。
     :return: True=已获得并保存有效 Cookie；False=用户取消或失败
     """
-    if not _WEBENGINE_AVAILABLE:
+    if not webview_available():
+        return _open_manual_dialog(parent)
+
+    state = run_webview_login()
+
+    if state["ok"]:
         try:
-            from ui.dialogs import show_quark_cookie_dialog
-        except ImportError:
-            from dialogs import show_quark_cookie_dialog
-        return show_quark_cookie_dialog(parent)
-    dlg = QuarkLoginDialog(parent)
-    return dlg.exec() == QDialog.Accepted
+            from utils.common import save_quark_cookie
+            save_quark_cookie(state["header"])
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(
+                parent, "登录失败", f"登录已通过验证，但保存 Cookie 失败：{e}")
+            return False
+        if parent is not None:
+            QMessageBox.information(
+                parent, "登录成功",
+                f"已登录并保存夸克账号：{state['msg'] or '夸克用户'}")
+        return True
+
+    # 自动登录没走完：给出明确的回退入口，不让用户卡住
+    detail = state.get("error") or "窗口已关闭或登录未完成"
+    if parent is None:
+        return False
+    reply = QMessageBox.question(
+        parent, "登录未完成",
+        f"没能自动完成登录（{detail}）。\n\n"
+        "要改用「手动粘贴 Cookie」的方式登录吗？",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+    if reply != QMessageBox.Yes:
+        return False
+    return _open_manual_dialog(parent)

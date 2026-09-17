@@ -115,17 +115,210 @@ class DownloadRequestTests(unittest.TestCase):
         self.assertNotIn('headers["range"]', src)
         self.assertIn('os.remove(part_path)', src)
         self.assertIn('with open(part_path, "wb")', src)
-        self.assertIn("sess = requests.Session()", src)
+        # requests 改为按需取用（_rq()），不能再写死 requests.Session()
+        self.assertIn("sess = _rq().Session()", src)
 
-    def test_login_dialog_refreshes_cookies_and_rejects_same_account(self):
+    def test_requests_is_lazy_imported(self):
+        """requests 必须延迟导入：它是启动阶段最大的一笔 import 成本。"""
+        import subprocess
+
+        path = os.path.join(ROOT, "core", "quark.py")
+        with open(path, "r", encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("\nimport requests\n", src)
+        self.assertIn("def _rq()", src)
+
+        # 真实校验：只 import core.quark，requests 不应被拖进来
+        code = ("import sys; sys.path.insert(0, %r); "
+                "import core.quark; print('requests' in sys.modules)" % ROOT)
+        out = subprocess.run([sys.executable, "-c", code],
+                             capture_output=True, text=True)
+        self.assertIn("False", out.stdout)
+
+    def test_login_uses_system_webview_not_qtwebengine(self):
+        """登录必须用系统 WebView2：QtWebEngine 会给安装包加 210 MB。"""
         path = os.path.join(ROOT, "ui", "quark_login_dialog.py")
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn("loadAllCookies", src)
-        self.assertIn("_is_same_saved_account", src)
-        self.assertIn("cookieRemoved", src)
-        self.assertIn("NoPersistentCookies", src)
-        self.assertNotIn("quark.cn\" not in domain", src)
+        # 文档里会解释"为什么不用 QtWebEngine"，所以只禁 import，不禁文本
+        self.assertNotIn("from PySide6.QtWebEngine", src)
+        self.assertNotIn("import QtWebEngine", src)
+        self.assertNotIn("QWebEngineView", src)
+        # WebView2 的 Cookie 管理器能读回 HttpOnly 的登录令牌，这是本方案的前提
+        self.assertIn("get_cookies", src)
+        # 身份判定只能按 __pus（__puus 是每次访问网盘都会被轮换的会话令牌）
+        self.assertIn("same_login_account", src)
+
+    def test_card_styles_use_object_name_selectors(self):
+        """卡片样式必须用 #ObjectName 限定。
+
+        裸写 "QFrame { ... }" 会命中卡片内**所有后代 QFrame**，而 QLabel 正是
+        QFrame 的子类——卡片里每一行文字都会被套上一条 1px 边框，表现为
+        "每行字都有个很浅的灰框"。同理 QWidget / QLabel 裸选择器也有此风险。
+        """
+        cases = [
+            ("ui/settings_page.py", "#SettingsCard {"),
+            ("ui/settings_page.py", "#SettingsNavBar {"),
+            ("ui/mod_page.py", "#DetailCard {"),
+            ("ui/mod_page.py", "#DetailTitleCard {"),
+        ]
+        for rel, expect in cases:
+            with open(os.path.join(ROOT, rel), "r", encoding="utf-8") as f:
+                src = f.read()
+            self.assertIn(expect, src, f"{rel} 里缺少 {expect} 选择器")
+
+    def test_github_icon_renders(self):
+        """详情页的 GitHub 图标：QSvgRenderer 可用且能真的画出东西。"""
+        from PySide6.QtWidgets import QApplication
+
+        from ui import mod_page
+
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        self.assertIsNotNone(mod_page.QSvgRenderer,
+                             "PySide6.QtSvg 不可用，图标会退化成文字")
+        pix = mod_page._render_svg_icon("github", 16)
+        self.assertIsNotNone(pix)
+        self.assertFalse(pix.isNull(), "GitHub 图标渲染出的是空图")
+        self.assertGreater(pix.width(), 0)
+
+    def test_slim_rules_keep_every_pyside6_module_in_use(self):
+        """防止瘦身时把代码实际用到的 Qt 模块剔掉。
+
+        曾误删 QtSvg：详情页的 GitHub 图标靠 QSvgRenderer 渲染，缺了它不会报错，
+        只是静默退化成文字——这类"不崩但功能没了"的问题必须靠测试兜住。
+        """
+        import re
+
+        spec = os.path.join(ROOT, "main.spec")
+        with open(spec, "r", encoding="utf-8") as f:
+            src = f.read()
+
+        # ① main.spec 的白名单
+        keep_block = re.search(r"_QT_BINDING_KEEP\s*=\s*\{(.*?)\}", src, re.S)
+        self.assertIsNotNone(keep_block, "没找到 _QT_BINDING_KEEP")
+        kept = set(re.findall(r"'([a-z0-9]+)'", keep_block.group(1)))
+
+        # ② 项目里真正 import 了哪些 PySide6 模块
+        used = set()
+        for rel in ("main.py", os.path.join("ui", "mod_page.py"),
+                    os.path.join("ui", "main_window.py"),
+                    os.path.join("ui", "settings_page.py"),
+                    os.path.join("ui", "dialogs.py"),
+                    os.path.join("ui", "quark_login_dialog.py"),
+                    os.path.join("core", "installer.py"),
+                    os.path.join("core", "online_install.py")):
+            path = os.path.join(ROOT, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+            used.update(m.lower() for m in
+                        re.findall(r"from\s+PySide6\.(\w+)\s+import", text))
+
+        self.assertTrue(used, "没解析到任何 PySide6 模块")
+        missing = used - kept
+        self.assertFalse(
+            missing,
+            f"代码用到了 {sorted(missing)}，但 main.spec 的 _QT_BINDING_KEEP 里没有，"
+            f"这些模块会被瘦身规则剔除")
+
+        # ③ 用到的模块对应的 Qt 运行时 DLL 也要在白名单里
+        dll_block = re.search(r"_QT_DLL_KEEP\s*=\s*\{(.*?)\}", src, re.S)
+        self.assertIsNotNone(dll_block)
+        dlls = set(re.findall(r"'([a-z0-9]+\.dll)'", dll_block.group(1)))
+        self.assertIn("qt6svg.dll", dlls,
+                      "Qt6Svg 被剔除会让 GitHub 等矢量图标退化成文字")
+
+    def test_cookies_to_header_keeps_only_quark_domain(self):
+        import http.cookies
+
+        from ui.quark_login_dialog import _cookies_to_header
+
+        quark = http.cookies.SimpleCookie()
+        quark.load("__pus=abc123; Domain=.quark.cn")
+        other = http.cookies.SimpleCookie()
+        other.load("tracker=zzz; Domain=.example.com")
+        host_only = http.cookies.SimpleCookie()
+        host_only.load("b-user-id=uid-1")
+
+        header = _cookies_to_header([quark, other, host_only])
+        self.assertIn("__pus=abc123", header)
+        self.assertIn("b-user-id=uid-1", header)  # 无 Domain 属性也收
+        self.assertNotIn("tracker=zzz", header)
+
+    def test_key_cookie_detection(self):
+        from ui.quark_login_dialog import _has_key_cookies
+        self.assertTrue(_has_key_cookies("__pus=a; __puus=b; other=c"))
+        self.assertFalse(_has_key_cookies("__pus=a; other=c"))
+        self.assertFalse(_has_key_cookies(""))
+
+    def test_evaluate_cookies_detects_login(self):
+        """拿到 __pus+__puus 且验证通过 -> 判定登录完成"""
+        import http.cookies
+
+        from ui import quark_login_dialog as d
+
+        ck = http.cookies.SimpleCookie()
+        ck.load("__pus=aaa; Domain=.quark.cn")
+        ck2 = http.cookies.SimpleCookie()
+        ck2.load("__puus=bbb; Domain=.quark.cn")
+
+        with mock.patch.object(d, "_verify", return_value=(True, "测试用户")):
+            done, header, msg = d._evaluate_cookies([ck, ck2], "")
+        self.assertTrue(done)
+        self.assertIn("__pus=aaa", header)
+        self.assertEqual(msg, "测试用户")
+
+        # 同一份 header 不重复验证（避免每次轮询都打网络请求）
+        with mock.patch.object(d, "_verify", return_value=(True, "x")) as v:
+            done2, _, _ = d._evaluate_cookies([ck, ck2], header)
+        self.assertFalse(done2)
+        v.assert_not_called()
+
+        # 没登录（缺 __puus）时不应判定成功
+        with mock.patch.object(d, "_verify", return_value=(True, "x")) as v2:
+            done3, _, _ = d._evaluate_cookies([ck], "")
+        self.assertFalse(done3)
+        v2.assert_not_called()
+
+    def test_login_window_closes_itself_when_logged_in(self):
+        """登录成功后必须自动关窗：轮询线程里任何异常都会让这一步静默失效。"""
+        import http.cookies
+
+        from ui import quark_login_dialog as d
+
+        ck = http.cookies.SimpleCookie()
+        ck.load("__pus=aaa; __puus=bbb; Domain=.quark.cn")
+
+        class _FakeWindow:
+            def __init__(self):
+                self.destroyed = False
+
+            def get_cookies(self):
+                return [ck]
+
+            def destroy(self):
+                self.destroyed = True
+
+        fake_win = _FakeWindow()
+
+        class _FakeWebview:
+            @staticmethod
+            def create_window(*_a, **_kw):
+                return fake_win
+
+            @staticmethod
+            def start(func, win, **_kw):
+                func(win)          # 同步跑一次轮询，模拟"上来就已登录"
+
+        with mock.patch.dict(sys.modules, {"webview": _FakeWebview}):
+            with mock.patch.object(d, "_verify", return_value=(True, "测试用户")):
+                with mock.patch.object(d, "_POLL_INTERVAL", 0):
+                    state = d.run_webview_login()
+
+        self.assertTrue(state["ok"], msg=f"轮询未检出登录：{state}")
+        self.assertEqual(state["msg"], "测试用户")
+        self.assertTrue(fake_win.destroyed, "登录成功后窗口没有被关闭")
 
 
 class ParallelDefaultTests(unittest.TestCase):

@@ -31,7 +31,20 @@ import threading
 import time
 from http.cookiejar import DefaultCookiePolicy
 
-import requests
+# requests 延迟导入：它连带 urllib3/certifi/charset_normalizer 一大串模块，
+# 而这个模块是被 main_window 顶层 import 的（core -> installer -> quark），
+# 等于每次启动都要为"也许根本用不到的下载功能"付 0.2~0.3s 的 import 成本。
+_requests = None
+
+
+def _rq():
+    """按需取 requests 模块（首次调用时才真正 import）"""
+    global _requests
+    if _requests is None:
+        import requests as _mod
+        _requests = _mod
+    return _requests
+
 
 # CDN 直链全局串行：QuarkPanTool 本身就是逐个 await 下载。
 # 多路同时打夸克 CDN 是 412 风控的主要来源，API 转存仍可并行。
@@ -153,7 +166,7 @@ class QuarkClient:
         self.progress_callback = progress_callback or (lambda *a: None)
         self.status_callback = status_callback or (lambda *a: None)
         self.timeout = timeout
-        self.session = requests.Session()
+        self.session = _rq().Session()
         # 夸克为国内服务，无需走代理；忽略系统/环境代理，避免本机代理（如 Clash 7890）
         # 未开或异常时导致 ProxyError 使所有分享链接"不可用"。
         self.session.trust_env = False
@@ -735,7 +748,7 @@ class QuarkClient:
             "referer": "https://pan.quark.cn/",
             "cookie": self.cookies,
         }
-        sess = requests.Session()
+        sess = _rq().Session()
         sess.trust_env = False
         sess.cookies.set_policy(_BlockCookies())
         try:

@@ -127,8 +127,13 @@ def normalize_version(version):
 # ============================================================
 
 def _section_card_style(border_color="#252525"):
+    """卡片样式。
+
+    必须用 objectName 限定选择器：裸写 "QFrame { ... }" 会命中卡片内所有后代
+    QFrame，而 QLabel 正是 QFrame 的子类 —— 卡片里每一行文字都会被套上一条边框。
+    """
     return f"""
-        QFrame {{
+        #DetailCard {{
             background-color: #1c1c1e;
             border: 1px solid {border_color};
             border-radius: 12px;
@@ -424,6 +429,8 @@ def find_mod_config_file(game_path, mod_name):
 class DetailCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 与 _section_card_style() 里的 #DetailCard 选择器对应
+        self.setObjectName("DetailCard")
         self.setStyleSheet(_section_card_style())
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 16, 20, 16)
@@ -1343,8 +1350,10 @@ class ModDetailPanel(QWidget):
 
         # 标题卡片
         self.title_card = QFrame()
+        # 同上：必须用 objectName 限定，否则卡片内的标题 QLabel 也会被套上边框
+        self.title_card.setObjectName("DetailTitleCard")
         self.title_card.setStyleSheet("""
-            QFrame {
+            #DetailTitleCard {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #242a3d, stop:1 #1a1b26);
                 border: 1px solid #353a4d;
@@ -2112,6 +2121,19 @@ class ModPage(QWidget):
         self._sel_shift = False           # 按下瞬间是否按住 Shift
         self._sel_base = set()            # 拖拽开始前已选中的行集合（Ctrl 加选时作基线）
         self._sel_autoscroll = None       # 拖拽到边缘时的自动滚动 QTimer
+
+        # widget 树延迟到首次真正展示本页时才构建（见 _ensure_ui）。
+        # 原因：_setup_ui() 要建几百个控件，实测约 0.8s；MainWindow 启动时会一次性
+        # 构造全部 4 个页面，用户在首页根本看不到本页，不该让首屏白等这 0.8s。
+        self._ui_ready = False
+        self._fs_watcher = None
+        self._mods_sig = None
+
+    def _ensure_ui(self):
+        """首次需要展示本页时才构建 widget 树（并把文件监听挂上去）。"""
+        if self._ui_ready:
+            return
+        self._ui_ready = True
         self._setup_ui()
 
         # 文件系统监听：Mods 文件夹（含 Disabled 子目录）变动时自动刷新本地列表，
@@ -2131,7 +2153,6 @@ class ModPage(QWidget):
         self._fs_poll_timer = QTimer(self)
         self._fs_poll_timer.setInterval(1000)
         self._fs_poll_timer.timeout.connect(self._poll_mods_dir)
-        self._mods_sig = None
         self._fs_poll_timer.start()
 
     def _setup_ui(self):
@@ -2859,6 +2880,7 @@ class ModPage(QWidget):
             pass
 
     def refresh_mod_list(self, game_path):
+        self._ensure_ui()
         try:
             self._game_path = game_path or ""
             self._update_fs_watch()  # 同步监听的 Mods 目录（含 Disabled）
@@ -3096,6 +3118,10 @@ class ModPage(QWidget):
 
     def _poll_mods_dir(self):
         """兜底轮询：每秒比对 Mods 目录快照，有变化就刷新列表。"""
+        # 页面还没构建过 = 用户从没看过本地页，没必要为它干活（也就不会在启动后
+        # 一秒偷偷把那 0.8s 的构建费付掉）
+        if not self._ui_ready:
+            return
         gp = self.parent.game_path if (self.parent
                                        and hasattr(self.parent, 'game_path')) else None
         if not gp:
@@ -3110,8 +3136,9 @@ class ModPage(QWidget):
 
     def _on_mods_dir_changed(self, path):
         # 目录变动（增删 mod / 启用禁用切换 / metadata 写入）触发防抖刷新
-        if self._fs_watch_timer:
-            self._fs_watch_timer.start()
+        timer = getattr(self, '_fs_watch_timer', None)
+        if timer:
+            timer.start()
 
     def _on_local_update_clicked(self, mod_name):
         """本地 Mod 有更新：点「待更新」切到在线页并选中该 Mod 去升级。"""
