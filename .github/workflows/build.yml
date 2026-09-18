@@ -87,8 +87,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "删除旧 Release 失败" }
           }
 
-          gh release create $tag --title "KnightModder v$($j.version)" `
-            --notes "$($j.changelog)" $files
-          if ($LASTEXITCODE -ne 0) { throw "发布 Release 失败" }
+          # 刚推上来的 tag 在 GitHub 侧可能还没同步完（之前用 softprops 时日志里
+          # 就出现过 "Release is not yet discoverable by tag"），gh 会报 tag not
+          # found。所以失败后等几秒重试；若其实已经建好了（view 查得到）也算成功。
+          $ok = $false
+          for ($i = 1; $i -le 5; $i++) {
+            gh release create $tag --title "KnightModder v$($j.version)" `
+              --notes "$($j.changelog)" $files
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            gh release view $tag *> $null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "Release 已存在，视为成功"
+              $ok = $true
+              break
+            }
+            Write-Host "第 $i 次发布未成功，5 秒后重试"
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) { throw "发布 Release 失败（已重试 5 次）" }
 
           gh release view $tag
