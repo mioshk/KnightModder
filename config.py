@@ -45,14 +45,23 @@ README_URL_RAW = f"{GH_RAW_BASE}/README.md"
 USAGE_URL_CDN = f"{GH_CDN_BASE}/USAGE.md"
 USAGE_URL_RAW = f"{GH_RAW_BASE}/USAGE.md"
 
-# ---------- API 压缩包平台映射（同时用作 downloads/ 本地缓存文件名） ----------
+# ---------- API 安装清单（api_manifest.json） ----------
+# API 的下载地址不再写死在软件里：仓库根目录的 api_manifest.json 才是唯一来源，
+# 作者改完往 GitHub 一推，所有已安装的软件下次装 API 时就会自动读到新清单，
+# 不必重新发版。读取与兜底逻辑见 core/api_manifest.py。
+API_MANIFEST_FILE = "api_manifest.json"
+API_MANIFEST_URL_CDN = f"{GH_CDN_BASE}/{API_MANIFEST_FILE}"
+API_MANIFEST_URL_RAW = f"{GH_RAW_BASE}/{API_MANIFEST_FILE}"
+
+# 下面两个字典是**最后的离线兜底**：只有 GitHub 上的清单和程序目录里那份本地
+# 清单都读不到时才会用到（见 core/api_manifest.py 的 _builtin_manifest）。
+# 平时改 API 地址请改 api_manifest.json，不要动这里。
 API_ZIP_MAP = {
     "Windows": "moddingapi.v77.windows.zip",
     "Darwin":  "moddingapi.v77.macos.zip",
     "Linux":   "moddingapi.v77.linux.zip",
 }
 
-# ---------- Modding API 夸克网盘分享链接（按平台，参考 Lumafly 直接从网盘安装） ----------
 API_QUARK_LINKS = {
     "Windows": "https://pan.quark.cn/s/21185cedf1e2",
     "Darwin":  "https://pan.quark.cn/s/4630364d1d19",

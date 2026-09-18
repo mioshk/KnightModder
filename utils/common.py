@@ -25,8 +25,28 @@ def get_system_type():
 
 
 def get_download_dir():
-    """获取软件下载目录（软件根目录下的 downloads 文件夹）"""
+    """获取下载缓存目录。
+
+    优先用用户自定义的路径（config.json 的 download_dir，由设置页「更改路径」
+    写入）；没自定义过就用软件根目录下的 downloads 文件夹。
+    """
+    custom = str(load_app_setting("download_dir") or "").strip()
+    if custom:
+        return os.path.normpath(custom)
     return os.path.join(get_base_dir(), DOWNLOAD_DIR_NAME)
+
+
+def set_download_dir(path: str) -> bool:
+    """设置下载缓存目录，写进 config.json 的 download_dir。
+
+    传空串、或传的正好就是默认目录时，把该项清掉而不是写死——否则以后软件
+    换个位置（绿色版挪文件夹 / 重装到别的盘），这个旧路径还会一直生效。
+    """
+    p = str(path or "").strip()
+    default = os.path.join(get_base_dir(), DOWNLOAD_DIR_NAME)
+    if p and os.path.normpath(p) == os.path.normpath(default):
+        p = ""
+    return save_app_setting("download_dir", p)
 
 
 def get_save_folder():

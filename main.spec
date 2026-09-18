@@ -84,7 +84,9 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
+    # api_manifest.json 是 API 下载地址的离线兜底清单（线上读不到时用它），
+    # 必须随程序一起打包，否则打包版在离线时会直接掉到 config 里的内置配置。
+    datas=[('assets', 'assets'), (config.API_MANIFEST_FILE, '.')],
     # webview：登录窗口改用系统 Edge 内核（WebView2）后新增的依赖。
     # pywebview 的 Windows 后端（edgechromium）是运行时动态导入的，静态分析扫不到，
     # 而它内部还要 import clr（pythonnet）并加载 System.Windows.Forms —— 缺了 clr

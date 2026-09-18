@@ -5,17 +5,16 @@
 集中管理在线下载所需的配置：
   1. 夸克网盘账号：登录（软件内嵌官方登录页，扫码 / 手机号 / 账密）、
      在线验证状态、退出登录；
-  2. 下载缓存目录：显示 / 打开本地 downloads 目录；
-  3. 关于与版本信息。
+  2. 下载设置与缓存：缓存目录（可更改路径 / 打开）、下载并行数。
 
 所有下载所需的夸克登录入口统一收口到这里（在线模组页不再放登录按钮）。
 """
-import json
 import os
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QFont, QDesktopServices
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,12 +27,12 @@ from PySide6.QtWidgets import (
 )
 
 from utils.common import (
-    get_base_dir,
     get_download_dir,
     load_parallel_downloads,
     load_quark_cookie,
     save_app_setting,
     save_quark_cookie,
+    set_download_dir,
 )
 
 _COLOR_BG = "#1b1b1f"
@@ -162,11 +161,19 @@ class _Card(QFrame):
         self._layout.addWidget(label)
 
     def add_row(self, *widgets, stretch_last=False):
-        """一行控件：默认靠左排布，末尾补 stretch 防止被拉宽"""
+        """一行控件：默认靠左排布，末尾补 stretch 防止被拉宽。
+
+        需要"某个控件吃掉剩余宽度、其它按自身宽度靠边"时，传 (控件, stretch)
+        元组即可，例如 add_row((path_label, 1), btn) —— 路径占满、按钮不拉伸。
+        """
         row = QHBoxLayout()
         row.setSpacing(10)
         for w in widgets:
-            row.addWidget(w, 1 if stretch_last else 0)
+            if isinstance(w, tuple):
+                widget, stretch = w
+                row.addWidget(widget, stretch)
+            else:
+                row.addWidget(w, 1 if stretch_last else 0)
         if not stretch_last:
             row.addStretch()
         self._layout.addLayout(row)
@@ -184,7 +191,7 @@ class _Card(QFrame):
 
 
 class SettingsPage(QWidget):
-    """设置页面：夸克账号 / 下载缓存 / 关于"""
+    """设置页面：夸克账号 / 下载设置与缓存"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -219,21 +226,12 @@ class SettingsPage(QWidget):
         nav_layout.addStretch()
         layout.addWidget(nav_bar)
 
-        # 内容区：限宽居中，避免卡片在宽屏上被拉得很长
+        # 内容区：卡片顶满可用宽度（此前是限宽 880 居中，宽屏两侧留白）
         scroll = QWidget()
-        outer = QHBoxLayout(scroll)
-        outer.setContentsMargins(24, 18, 24, 24)
-        outer.setSpacing(0)
-
-        center = QWidget()
-        center.setMaximumWidth(880)
-        body = QVBoxLayout(center)
-        body.setContentsMargins(0, 0, 0, 0)
+        body = QVBoxLayout(scroll)
+        body.setContentsMargins(24, 18, 24, 24)
         body.setSpacing(14)
         body.setAlignment(Qt.AlignTop)
-        outer.addStretch(1)
-        outer.addWidget(center, 4)
-        outer.addStretch(1)
 
         # ---------------- 卡 1：夸克网盘账号 ----------------
         quark_card = _Card()
@@ -263,16 +261,23 @@ class SettingsPage(QWidget):
         dl_card.add_text("Mod 安装包先下载到软件目录的 downloads 文件夹，安装完成可自行清理。",
                          size=10)
 
+        # 路径要完整显示：1080p 下窗口窄，长路径会被布局压到"只剩一半"，
+        # 所以让它吃掉整行剩余宽度并开启换行——宽度不够时自动折行，
+        # 而不是像之前那样把后半截直接裁掉。
         self.dl_path_label = QLabel(get_download_dir())
         self.dl_path_label.setFont(QFont("Consolas", 10))
+        self.dl_path_label.setWordWrap(True)
+        self.dl_path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.dl_path_label.setStyleSheet(
             "color: #9ecbff; background: #1a1a1e; border: 1px solid #2c2c34;"
             " border-radius: 8px; padding: 8px 12px;")
         self.dl_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.change_dir_btn = _mk_btn("📁 更改路径", "ghost")
+        self.change_dir_btn.clicked.connect(self._change_download_dir)
         open_dir_btn = _mk_btn("📂 打开", "ghost")
         open_dir_btn.clicked.connect(self._open_download_dir)
-        # 路径占满剩余宽度，按钮按自身宽度靠右
-        dl_card.add_row(self.dl_path_label, open_dir_btn, stretch_last=False)
+        # 路径 stretch=1 吃满剩余宽度，两个按钮按自身宽度排在右侧
+        dl_card.add_row((self.dl_path_label, 1), self.change_dir_btn, open_dir_btn)
 
         dl_card.add_divider()
         dl_card.add_spacer(4)
@@ -300,49 +305,8 @@ class SettingsPage(QWidget):
             color=_COLOR_DIM, size=9)
         body.addWidget(dl_card)
 
-        # ---------------- 卡 3：关于 ----------------
-        about_card = _Card()
-        self.about_label = QLabel()
-        self.about_label.setFont(QFont(_FONT, 10))
-        self.about_label.setStyleSheet(f"color: {_COLOR_SUB}; background: transparent;")
-        self.about_label.setWordWrap(True)
-        self.about_label.setText(self._about_text())
-        about_card.add_title("ℹ️ 关于")
-        about_card.add_row(self.about_label, stretch_last=True)
-        body.addWidget(about_card)
-
         body.addStretch()
         layout.addWidget(scroll, stretch=1)
-
-    @staticmethod
-    def _load_version_text() -> str:
-        """从 version.json 读取版本信息（保留给外部调用）"""
-        try:
-            path = os.path.join(get_base_dir(), "version.json")
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return (data.get("version", ""),
-                        data.get("release_date", ""),
-                        data.get("changelog", "") or "")
-        except Exception:
-            pass
-        return "", "", ""
-
-    @staticmethod
-    def _about_text() -> str:
-        """关于卡片正文：版本号 + 发布日期 + 更新内容"""
-        ver, date, changelog = SettingsPage._load_version_text()
-        if not ver:
-            try:
-                from config import APP_VERSION
-                ver = APP_VERSION
-            except Exception:
-                ver = ""
-        head = f"版本 {ver}" + (f"　·　{date}" if date else "")
-        if changelog:
-            return f"{head}\n\n{changelog}"
-        return head
 
     def _set_quark_state(self, text: str, color: str, bg: str):
         """更新状态徽章（setText + 保持徽章的底色/圆角样式）"""
@@ -429,6 +393,32 @@ class SettingsPage(QWidget):
                 page_online._refresh_quark_status()
             if hasattr(parent, "_log"):
                 parent._log(tip, "success")
+
+    def _change_download_dir(self):
+        """更换下载缓存目录（写进 config.json，下次下载即生效）"""
+        cur = get_download_dir()
+        path = QFileDialog.getExistingDirectory(
+            self, "选择下载缓存目录", cur,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+        if not path:
+            return
+        path = os.path.normpath(path)
+        if path == os.path.normpath(cur):
+            return
+        if not set_download_dir(path):
+            QMessageBox.warning(self, "更改失败",
+                                "无法写入 config.json，下载目录未更改。")
+            return
+        # 用 get_download_dir() 回读：选回默认目录时它会返回默认路径，
+        # 直接setText(path) 会和实际生效的目录不一致。
+        self.dl_path_label.setText(get_download_dir())
+        tip = f"下载缓存目录已改为：{get_download_dir()}"
+        parent = self.parent
+        if parent is not None and hasattr(parent, "_log"):
+            parent._log(tip, "success")
+        QMessageBox.information(
+            self, "已更改下载目录",
+            f"{tip}\n\n原有文件不会自动迁移，需要的话请手动从旧目录复制过去。")
 
     @staticmethod
     def _open_download_dir():

@@ -48,7 +48,7 @@ if hasattr(threading, "excepthook"):
 
 # ---------- 依赖检查 ----------
 try:
-    from PySide6.QtCore import Qt, QSize, QTimer
+    from PySide6.QtCore import Qt, QRect, QTimer
     from PySide6.QtGui import QFont, QIcon
     from PySide6.QtWidgets import QApplication
 except ImportError:
@@ -67,6 +67,28 @@ def _delayed_check_update(window):
     auto_check_for_updates(window)
 
 
+def _center_window(window):
+    """把窗口居中到它所在屏幕的**可用区域**。
+
+    主窗口是无边框的（Qt.FramelessWindowHint，见 ui/main_window.py），拖动全靠
+    顶部那条自定义标题栏。位置一旦落到屏幕外、或被任务栏压住，标题栏就够不着，
+    用户再也拖不动窗口。而无边框窗口不像普通窗口那样会被系统稳妥地摆放
+    （尤其 4K / 高缩放 / 任务栏在顶部时，默认位置经常把顶边甩到屏幕外），
+    所以必须自己按 availableGeometry 摆位 —— 它已经排除了任务栏。
+    """
+    screen = window.screen() or QApplication.primaryScreen()
+    avail = screen.availableGeometry() if screen is not None else None
+    if avail is None or avail.isEmpty():
+        return
+    # 窗口不能比可用区域还大，否则居中后上下两边会同时溢出屏幕
+    w = max(1, min(window.width(), avail.width()))
+    h = max(1, min(window.height(), avail.height()))
+    if (w, h) != (window.width(), window.height()):
+        window.resize(w, h)
+    window.move(avail.x() + (avail.width() - w) // 2,
+                avail.y() + (avail.height() - h) // 2)
+
+
 def main():
     """程序主入口"""
 
@@ -81,23 +103,28 @@ def main():
     # 任务栏/标题栏图标（打包后从 _MEIPASS 读取，源码运行从项目目录读取）
     app.setWindowIcon(QIcon(get_asset_path("icon.ico")))
 
-    # 根据屏幕分辨率动态计算窗口和字体大小
+    # 按屏幕「可用区域」计算窗口和字体大小。
+    # 用 availableGeometry 而不是 size()：后者含任务栏，4K 屏上按整屏算出来的
+    # 高度会把窗口顶边顶到任务栏底下甚至屏幕外。
     screen = app.primaryScreen()
-    screen_size = screen.size() if screen else QSize(1920, 1080)
+    avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
 
     # 窗口尺寸：宽度占屏幕 72%，高度占 85%
-    win_width = min(1400, int(screen_size.width() * 0.72))
-    win_height = min(920, int(screen_size.height() * 0.85))
+    win_width = min(1400, int(avail.width() * 0.72))
+    win_height = min(920, int(avail.height() * 0.85))
 
     # 字体大小随窗口宽度变化
     font_size = max(9, min(13, int(win_width / 110)))
     font = QFont("Microsoft YaHei", font_size)
     app.setFont(font)
 
-    # 创建并显示主窗口
+    # 创建并显示主窗口：先摆好位置再 show，免得先在错误位置闪一下
     window = MainWindow()
     window.resize(win_width, win_height)
+    _center_window(window)
     window.show()
+    # show 之后再校正一次：多屏时 primaryScreen 未必是窗口真正所在的那块屏
+    _center_window(window)
 
     # ✅ 窗口显示后再弹窗（100% 生效）
     QTimer.singleShot(400, window.trigger_first_run_dialog)

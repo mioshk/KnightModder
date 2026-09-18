@@ -15,9 +15,11 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir, API_ZIP_MAP, API_QUARK_LINKS
+from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir
 from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path
 from core.quark import QuarkClient, QuarkError
+# API 的下载地址不再写死在 config 里，统一从 api_manifest.json（线上清单）读取
+from core.api_manifest import get_package
 
 
 # ==================== 文件工具函数 ====================
@@ -180,29 +182,57 @@ def get_api_state(game_path):
             "has_vanilla_backup": has_vanilla_backup}
 
 
-def _resolve_api_package(status_callback, progress_callback):
-    """
-    取得 API 安装包：downloads/ 里已有则优先用本地缓存；否则从夸克网盘下载
-    （下载后落盘到 downloads/ 供下次离线复用）。
-    :return: 本地 zip 路径
-    """
-    system = get_system_type()
-    if system not in API_ZIP_MAP:
-        raise RuntimeError(f"不支持的系统：{system}")
-    zip_name = API_ZIP_MAP[system]
-    link = API_QUARK_LINKS.get(system)
-    dl_dir = get_download_dir()
-    os.makedirs(dl_dir, exist_ok=True)
-    local_path = os.path.join(dl_dir, zip_name)
+def _verify_sha256(path, pkg):
+    """清单里给了 sha256 就校验：不一致直接丢弃，避免装到坏包或错包"""
+    if not pkg.sha256:
+        return
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 512), b""):
+            h.update(chunk)
+    if h.hexdigest() != pkg.sha256:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        raise RuntimeError("API 安装包校验失败（sha256 与清单不一致），已丢弃该文件")
 
-    # 本地缓存优先：命中则直接复用，无需触碰夸克
-    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
-        status_callback(f"使用本地缓存的 API 安装包：{zip_name}", "info")
-        return local_path
 
-    if not link:
-        raise RuntimeError(f"未配置 {system} 的夸克 API 下载链接")
+def _download_direct(url, save_path, pkg, status_callback, progress_callback):
+    """直链下载（http/https）：不用登录夸克、不用转存，能直下就优先直下"""
+    status_callback(f"正在下载 API 安装包：{url}", "info")
+    resp = safe_requests_get(url, timeout=60, stream=True)
+    if resp.status_code not in (200, 206):
+        raise RuntimeError(f"直链下载失败（HTTP {resp.status_code}）")
 
+    total = int(resp.headers.get("Content-Length") or pkg.size or 0)
+    tmp = save_path + ".part"
+    done = 0
+    try:
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(1024 * 256):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                done += len(chunk)
+                if progress_callback and total:
+                    progress_callback(min(100, int(done * 100 / total)))
+        if total and done < total:
+            raise RuntimeError(f"下载不完整（{done}/{total} 字节）")
+        os.replace(tmp, save_path)
+    finally:
+        if os.path.isfile(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    _verify_sha256(save_path, pkg)
+    return save_path
+
+
+def _download_from_quark(link, dl_dir, pkg, platform_key, status_callback,
+                         progress_callback):
+    """从夸克网盘分享下载；落盘后统一改成清单里的文件名，保证下次命中缓存"""
     cookie = load_quark_cookie()
     if not cookie:
         raise QuarkError("尚未配置夸克账号。请先点击顶部「设置」→「登录夸克账号」后再安装 API")
@@ -215,8 +245,6 @@ def _resolve_api_package(status_callback, progress_callback):
     )
     if not client.is_logged_in:
         raise QuarkError("夸克 Cookie 已失效，请重新在「设置 → 夸克账号」中更新")
-
-    platform_key = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}[system]
 
     def _sel(f):
         n = str(f.get("file_name") or "").lower()
@@ -232,15 +260,72 @@ def _resolve_api_package(status_callback, progress_callback):
             select_file=lambda f: str(f.get("file_name") or "").lower().endswith(".zip"))
 
     # 在返回目录里定位 zip：优先平台名匹配的
+    found = None
     for root, _dirs, files in os.walk(dest_dir):
         for fn in files:
             if fn.lower().endswith(".zip") and platform_key in fn.lower():
-                return os.path.join(root, fn)
-    for root, _dirs, files in os.walk(dest_dir):
-        for fn in files:
-            if fn.lower().endswith(".zip"):
-                return os.path.join(root, fn)
-    raise FileNotFoundError("夸克下载目录中未找到 API 压缩包")
+                found = os.path.join(root, fn)
+                break
+        if found:
+            break
+    if not found:
+        for root, _dirs, files in os.walk(dest_dir):
+            for fn in files:
+                if fn.lower().endswith(".zip"):
+                    found = os.path.join(root, fn)
+                    break
+            if found:
+                break
+    if not found:
+        raise FileNotFoundError("夸克下载目录中未找到 API 压缩包")
+
+    # 统一成清单里的文件名：否则下次按清单文件名找缓存永远命中不了，会重复下载
+    target = os.path.join(dl_dir, pkg.file_name)
+    if os.path.abspath(found) != os.path.abspath(target):
+        shutil.move(found, target)
+    _verify_sha256(target, pkg)
+    return target
+
+
+def _resolve_api_package(status_callback, progress_callback):
+    """
+    取得 API 安装包：downloads/ 里已有则优先用本地缓存；否则按 api_manifest.json
+    （GitHub 上的清单，读不到时逐级兜底到程序自带文件 / 内置配置）里的链接逐个
+    尝试，下载后落盘到 downloads/ 供下次离线复用。
+    :return: 本地 zip 路径
+    """
+    system = get_system_type()
+    pkg = get_package(system, status_callback=status_callback)
+    if pkg is None:
+        raise RuntimeError(f"API 清单里没有 {system} 的安装包配置")
+
+    dl_dir = get_download_dir()
+    os.makedirs(dl_dir, exist_ok=True)
+    local_path = os.path.join(dl_dir, pkg.file_name)
+
+    # 本地缓存优先：命中则直接复用，无需联网
+    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+        status_callback(f"使用本地缓存的 API 安装包：{pkg.file_name}", "info")
+        return local_path
+
+    if not pkg.all_links:
+        raise RuntimeError(f"API 清单里没有配置 {system} 的下载链接")
+
+    platform_key = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}[system]
+    errors = []
+    for link in pkg.all_links:
+        try:
+            # 直链优先（all_links 已排好序），网盘链接走夸克
+            if "pan.quark.cn" in link.lower():
+                return _download_from_quark(link, dl_dir, pkg, platform_key,
+                                            status_callback, progress_callback)
+            return _download_direct(link, local_path, pkg,
+                                    status_callback, progress_callback)
+        except Exception as e:  # noqa: BLE001 一个链接不行就换下一个
+            errors.append(f"{link} → {e}")
+            status_callback(f"⚠️ 该链接不可用，尝试下一个：{e}", "warn")
+
+    raise RuntimeError("API 所有下载链接均不可用：" + "；".join(errors))
 
 
 def install_api(game_path, status_callback=None, progress_callback=None):

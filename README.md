@@ -45,7 +45,8 @@ KnightModder 已支持 Windows / macOS / Linux 自动识别游戏目录，Mod �
 | 路径 | 职责 | 关键导出 |
 | --- | --- | --- |
 | `main.py` | 程序入口：崩溃日志、DPI/字体、创建主窗口、延迟检查更新 | `main()` |
-| `config.py` | 全局常量：版本、Steam、网络 URL（CDN+Raw 双源）、API 夸克链接、配色 | `APP_VERSION`, `API_QUARK_LINKS`, `API_ZIP_MAP` |
+| `config.py` | 全局常量：版本、Steam、网络 URL（CDN+Raw 双源）、API 清单地址、配色（另保留 API 内置兜底） | `APP_VERSION`, `API_MANIFEST_URL_CDN`, `API_ZIP_MAP` |
+| `core/api_manifest.py` | Modding API 清单：读取 GitHub 上的 `api_manifest.json`（CDN+Raw），逐级兜底到程序自带文件 / config 内置 | `load_manifest`, `get_package`, `ApiPackage` |
 | `core/installer.py` | 核心引擎：API 安装/还原（`.v`/`.m` 三份 dll 互换）、Mod 安装、夸克包解析 | `install_api`, `restore_vanilla`, `install_mods`, `_resolve_api_package` |
 | `core/online_install.py` | 在线模组：抓取 ModLinks、Cookie 校验 | `verify_cookie` |
 | `core/install_manager.py` | 安装编排：串联 UI → installer 的业务流程 | — |

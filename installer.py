@@ -59,12 +59,93 @@ def default_install_dir():
     return os.path.join(base, "Programs", APP_NAME)
 
 
-def last_install_dir():
-    """上次装到哪儿了（读卸载项里的 InstallLocation），没有就返回默认位置。
+def _main_exe_in(path):
+    """目录里的 KnightModder 主程序路径（没有则返回空串）"""
+    if not path or not os.path.isdir(path):
+        return ""
+    # 现在装出来的主程序固定叫 KnightModder.exe（见 main.spec 的 EXE_NAME）
+    exact = os.path.join(path, APP_NAME + ".exe")
+    if os.path.isfile(exact):
+        return exact
+    try:
+        for n in os.listdir(path):
+            if n.lower().endswith(".exe") and APP_NAME.lower() in n.lower():
+                return os.path.join(path, n)
+    except Exception:
+        pass
+    return ""
 
-    这样重装/升级时不用再选一次路径；卸载会顺带删掉这条记录，下次安装
-    自然回到默认位置。
+
+def _looks_like_install(path):
+    """目录里确实躺着 KnightModder 主程序，才算"已经装在这儿"。
+
+    只判断目录存在是不够的：注册表那条 InstallLocation 会被任何一次安装覆盖
+    （包括装到临时目录做测试），指向的目录也可能早就被删掉了。
     """
+    return bool(_main_exe_in(path))
+
+
+def _shortcut_paths():
+    """我们建的桌面 / 开始菜单快捷方式"""
+    return [
+        os.path.join(os.path.expanduser("~"), "Desktop", APP_NAME + ".lnk"),
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows",
+                     "Start Menu", "Programs", APP_NAME + ".lnk"),
+    ]
+
+
+def _read_shortcut_target(lnk):
+    """读 .lnk 指向的 exe（与 create_shortcut 对称，同样走 WScript.Shell）"""
+    if not os.path.isfile(lnk):
+        return ""
+    try:
+        ps = ("$ws = New-Object -ComObject WScript.Shell; "
+              f"$s = $ws.CreateShortcut('{lnk}'); $s.TargetPath")
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                            "-Command", ps],
+                           capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return (r.stdout or b"").decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
+def _candidate_drives():
+    """可以用来找已安装程序的盘符（C:\\、D:\\…）。
+
+    刻意不用 GetLogicalDriveStrings：实测它在这种环境里只返回系统盘 C:\\，
+    而程序其实装在 D:\\ —— 那样探测就等于瞎了，用户还是得手动选。改成直接按
+    C-Z 逐个试探（跳过 A/B，避免访问空软驱时卡住），再用 GetDriveTypeW 排掉
+    网络盘（离线时访问网络盘会让安装向导白等好几秒）。
+    """
+    try:
+        import ctypes
+    except Exception:
+        ctypes = None
+
+    out = []
+    for code in range(ord("C"), ord("Z") + 1):
+        root = f"{chr(code)}:\\"
+        try:
+            if not os.path.isdir(root):
+                continue
+        except Exception:
+            continue
+        if ctypes is not None:
+            try:
+                if ctypes.windll.kernel32.GetDriveTypeW(root) == 4:  # DRIVE_REMOTE
+                    continue
+            except Exception:
+                pass
+        out.append(root)
+    return out
+
+
+def _install_candidates():
+    """按可靠度排列的"可能已经装在哪儿"候选目录（已去重、保序）"""
+    cands = []
+
+    # ① 卸载项记录的位置：最权威，但会被后来的安装覆盖、目录也可能已删
     try:
         import winreg
         key = winreg.OpenKey(
@@ -72,11 +153,57 @@ def last_install_dir():
             r"Software\Microsoft\Windows\CurrentVersion\Uninstall\\" + APP_NAME)
         val, _ = winreg.QueryValueEx(key, "InstallLocation")
         winreg.CloseKey(key)
-        if val and os.path.isdir(val):
-            return os.path.normpath(val)
+        if val:
+            cands.append(val)
     except Exception:
         pass
-    return default_install_dir()
+
+    # ② 快捷方式反查：装过一般都会留快捷方式，它指向的正是用户日常在用的那份
+    for lnk in _shortcut_paths():
+        target = _read_shortcut_target(lnk)
+        if target:
+            cands.append(os.path.dirname(target))
+
+    # ③ 常见安装位置：默认位置 + 各固定盘的 Programs 下
+    cands.append(default_install_dir())
+    if os.environ.get("ProgramFiles"):
+        cands.append(os.path.join(os.environ["ProgramFiles"], APP_NAME))
+    for drive in _candidate_drives():
+        cands.append(os.path.join(drive, "Programs", APP_NAME))
+        cands.append(os.path.join(drive, APP_NAME))
+
+    seen, out = set(), []
+    for c in cands:
+        n = os.path.normpath(c) if c else ""
+        if n and n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
+
+
+def last_install_dir():
+    """上次装到哪儿了：在各个候选里找真正装着 KnightModder 的那份。
+
+    不能只读卸载项里的 InstallLocation —— 那条记录会被任意一次安装覆盖
+    （装到临时目录做测试也会），指向的目录还可能早被删掉，结果就是用户明明
+    装过、却每次都得手动再选一遍路径。所以这里多级探测并逐个校验。
+
+    多个候选都装着时取**主程序修改时间最新**的那份：机器上很可能同时留着旧
+    版本（例如 %LOCALAPPDATA% 下的 1.4.2 和 D 盘的 1.4.3），选到旧的那份就
+    变成"升级"到更老的版本了。
+    """
+    best, best_mtime = "", -1.0
+    for cand in _install_candidates():
+        exe = _main_exe_in(cand)
+        if not exe:
+            continue
+        try:
+            mtime = os.path.getmtime(exe)
+        except Exception:
+            mtime = 0.0
+        if mtime > best_mtime:
+            best, best_mtime = cand, mtime
+    return os.path.normpath(best) if best else default_install_dir()
 
 
 def _norm(path):
@@ -355,7 +482,9 @@ def run_gui(version, payload):
     root.geometry(f"{w}x{h}+{x}+{y}")
 
     # 默认沿用上一次的安装位置（没装过才是 %LOCALAPPDATA%\Programs\...）
-    path_var = tk.StringVar(value=last_install_dir())
+    detected_dir = last_install_dir()
+    found_existing = _looks_like_install(detected_dir)
+    path_var = tk.StringVar(value=detected_dir)
     notice_var = tk.StringVar(value="")
     desk_var = tk.BooleanVar(value=True)
     menu_var = tk.BooleanVar(value=True)
@@ -383,6 +512,13 @@ def run_gui(version, payload):
                   "你的游戏路径、夸克登录信息和已下载的 Mod 包都会保留。",
              bg="#f5f5f5", fg="#555555", font=("Microsoft YaHei", 9),
              justify="left").pack(anchor="w", pady=(6, 14))
+
+    if found_existing:
+        # 明说"已经帮你找到了"：否则用户看到路径框里有个地方，会以为还得自己选一遍
+        tk.Label(page1,
+                 text=f"✔ 检测到已安装，将直接覆盖升级到：\n{detected_dir}",
+                 bg="#f5f5f5", fg="#1a7f37", font=("Microsoft YaHei", 9),
+                 justify="left").pack(anchor="w", pady=(0, 12))
 
     tk.Label(page1, text="安装位置：", bg="#f5f5f5",
              font=("Microsoft YaHei", 10)).pack(anchor="w")
