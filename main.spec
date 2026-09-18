@@ -18,9 +18,13 @@ APP_NAME = 'KnightModder'
 # KM_ONEDIR=1 表示正在为「安装版」构建程序目录（见 build_installer.py）。
 # 这种模式下 exe 必须固定叫 KnightModder.exe：文件名一旦跟着版本号走，用户
 # 每升级一版，上次安装建好的桌面/开始菜单快捷方式就全指向上一版那个已经不
-# 存在的 exe 名了。绿色单文件版仍然保留版本号，方便一眼认出是哪个版本。
+# 存在的 exe 名了。
 _ONEDIR = os.environ.get('KM_ONEDIR') == '1'
-EXE_NAME = APP_NAME if _ONEDIR else f'{APP_NAME} v{_ver_str}'
+
+# 绿色单文件版是分发出去的成品，文件名带版本号 + 「绿色版」字样，与安装版
+# （「KnightModder v<版本> 安装版.exe」）成对出现，一眼能分清哪个要装、哪个
+# 解压即用。
+EXE_NAME = APP_NAME if _ONEDIR else f'{APP_NAME} v{_ver_str} 绿色版'
 
 # ---------- 与本项目无关的第三方包（禁止打进 bundle）----------
 # 打包环境的 Python 里装了很多其它项目的依赖（scipy/pandas/cryptography/
