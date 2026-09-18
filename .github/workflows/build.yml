@@ -1,7 +1,8 @@
 name: 构建安装包
 
-# 推送到 main 即构建一次；也可以在 GitHub 的 Actions 页面手动点「Run workflow」。
-# 打 v* 标签时额外把它发布成 Release（两个 exe 作为附件）。
+# 推送到 main：构建一次，产物放 Artifacts。
+# 推送 v* 标签：构建并发布成 Release（两个 exe 作为附件）。
+# 也可以在 Actions 页面手动点「Run workflow」。
 on:
   push:
     branches: [main]
@@ -11,6 +12,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write    # 创建 Release 需要写仓库内容的权限，默认可能只有读
     env:
       # Windows runner 的控制台默认是 cp1252，Python 打印中文进度提示会直接
       # UnicodeEncodeError 把构建打断。强制用 UTF-8 读写标准流。
@@ -28,19 +31,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 读取版本号
+      - name: 读取版本信息
         id: ver
         shell: pwsh
         run: |
-          $v = (Get-Content version.json -Raw | ConvertFrom-Json).version
-          "version=$v" >> $env:GITHUB_OUTPUT
-          Write-Host "版本: $v"
+          $j = Get-Content version.json -Raw | ConvertFrom-Json
+          "version=$($j.version)" >> $env:GITHUB_OUTPUT
+          # changelog 是多行文本，必须用 heredoc 写进 GITHUB_OUTPUT，
+          # 否则只有第一行会被当成输出值
+          "note<<CHANGELOG_EOF" >> $env:GITHUB_OUTPUT
+          $j.changelog >> $env:GITHUB_OUTPUT
+          "CHANGELOG_EOF" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $($j.version)"
 
       # 绿色单文件版：dist/KnightModder v<版本> 绿色版.exe
       - name: 构建绿色版
         run: pyinstaller --noconfirm main.spec
 
-      # 安装版：内部会先跑 onedir，再压成 payload，最后打成单文件安装器
+      # 安装版：内部先跑 onedir，再压成 payload，最后打成单文件安装器
       # 产出 dist/KnightModder v<版本> 安装版.exe
       - name: 构建安装版
         run: python build_installer.py
@@ -58,10 +66,11 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
 
-      # 只有打标签时才发 Release，避免每次 push 都生成一个发布版本
+      # 只有打 v* 标签时才发 Release，免得每次 push 都生成一个发布版本
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: KnightModder v${{ steps.ver.outputs.version }}
+          body: ${{ steps.ver.outputs.note }}
           files: dist/*.exe
