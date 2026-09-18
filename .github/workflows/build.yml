@@ -31,18 +31,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 读取版本信息
+      - name: 读取版本号
         id: ver
         shell: pwsh
         run: |
-          $j = Get-Content version.json -Raw | ConvertFrom-Json
-          "version=$($j.version)" >> $env:GITHUB_OUTPUT
-          # changelog 是多行文本，必须用 heredoc 写进 GITHUB_OUTPUT，
-          # 否则只有第一行会被当成输出值
-          "note<<CHANGELOG_EOF" >> $env:GITHUB_OUTPUT
-          $j.changelog >> $env:GITHUB_OUTPUT
-          "CHANGELOG_EOF" >> $env:GITHUB_OUTPUT
-          Write-Host "版本: $($j.version)"
+          $v = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $v"
 
       # 绿色单文件版：dist/KnightModder v<版本> 绿色版.exe
       - name: 构建绿色版
@@ -66,15 +61,24 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
 
-      # 只有打 v* 标签时才发 Release，免得每次 push 都生成一个发布版本
+      # 只有打 v* 标签时才发 Release，免得每次 push 都生成一个发布版本。
+      #
+      # 这里用 runner 自带的 GitHub CLI（gh），而不是 softprops/action-gh-release：
+      # 后者在附件文件名含空格时会多做一步「Restoring asset label」，去 PATCH
+      # /releases/assets/{id}，结果 404 Not Found 让整个 job 失败——而我们的 exe
+      # 恰恰就叫「KnightModder v1.4.5 绿色版.exe」这种带空格的名字。
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: KnightModder v${{ steps.ver.outputs.version }}
-          body: ${{ steps.ver.outputs.note }}
-          files: dist/*.exe
+        shell: pwsh
         env:
-          # 必须显式给 token：只配 permissions 不够，这个 action 拿不到写权限
-          # 就会在「发布 Release」这一步直接失败（构建本身是成功的）。
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $j = Get-Content version.json -Raw | ConvertFrom-Json
+          $files = (Get-ChildItem dist -Filter *.exe).FullName
+          if (-not $files) { throw "dist 下没有找到 exe，无法发布 Release" }
+          # 重跑（同一个 tag）时先清掉旧的，保证幂等
+          gh release delete $tag --yes 2>$null
+          gh release create $tag --title "KnightModder v$($j.version)" `
+            --notes $j.changelog $files
+          gh release view $tag
