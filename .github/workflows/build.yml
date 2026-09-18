@@ -11,6 +11,11 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Windows runner 的控制台默认是 cp1252，Python 打印中文进度提示会直接
+      # UnicodeEncodeError 把构建打断。强制用 UTF-8 读写标准流。
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
 

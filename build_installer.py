@@ -25,6 +25,16 @@ import subprocess
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
+# Windows 的标准输出默认是本地代码页（GitHub Actions 的 runner 是 cp1252），
+# 而下面全是中文进度提示——直接 print 会抛 UnicodeEncodeError 把整个构建搞挂。
+# 所以在打印任何东西之前，先把 stdout / stderr 切成 UTF-8。
+# （子进程那边由 run() 里的 PYTHONIOENCODING 兜底，这里只管本进程。）
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 极少数环境下 stdout 被替换过，切不了就算了
+        pass
+
 import config  # noqa: E402
 
 VER = getattr(config, "APP_VERSION", "1.0.0")
