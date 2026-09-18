@@ -1,5 +1,5 @@
 {
-  "version": "1.4.4",
+  "version": "1.4.5",
   "release_date": "2026-09-18",
   "changelog": "- 启动大幅提速！\n- 体积瘦身：安装包 231 MB → 44 MB，程序占用 308 MB → 101 MB\n- 夸克登录改用系统 Edge 内核渲染登录页，不再自带浏览器内核\n- 修复登录完成后窗口不自动关闭、Cookie 未保存的问题\n- 修复进程检测每秒启动一次 tasklist 导致的界面周期性卡顿\n- Mod详情页新增了github仓库原地址，可以一键进入作者源仓库查看该mod详细内容\n- Mod详情页新增了三个按钮，更方便使用",
   "quark_link": "https://pan.quark.cn/s/033d87a393ee"

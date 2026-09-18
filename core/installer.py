@@ -977,30 +977,6 @@ class DependencyResolver:
         deps = self.dependency_map.get(mod_name, [])
         return set(deps)
 
-    def check_missing_dependencies(self, installed_mods: Set[str]) -> Optional[Set[str]]:
-        """
-        检查已安装Mod中缺失的依赖
-        :param installed_mods: 已安装Mod名称集合
-        :return: 缺失的依赖集合，加载失败返回None
-        """
-        if not self.is_loaded:
-            return None
-
-        all_needed = set()
-        for mod in installed_mods:
-            if mod in self.dependency_map:
-                all_needed.update(self.get_all_dependencies(mod))
-
-        missing = all_needed - installed_mods
-        return missing
-
-    def get_mod_links(self, mod_names: List[str]) -> Dict[str, Optional[str]]:
-        """批量获取Mod下载链接"""
-        result = {}
-        for name in mod_names:
-            result[name] = self.link_map.get(name)
-        return result
-
     def get_mod_batch_links(self, mod_names: List[str]) -> Dict[str, Optional[List[str]]]:
         """批量获取Mod批量下载链接"""
         result = {}

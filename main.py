@@ -109,9 +109,10 @@ def main():
     screen = app.primaryScreen()
     avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
 
-    # 窗口尺寸：宽度占屏幕 72%，高度占 85%
+    # 窗口尺寸：宽度占屏幕 72%，高度占 75%（上限 780）。
+    # 原先 85%/920 太高，删掉两个按钮后首页内容变短，没必要占满屏幕。
     win_width = min(1400, int(avail.width() * 0.72))
-    win_height = min(920, int(avail.height() * 0.85))
+    win_height = min(780, int(avail.height() * 0.75))
 
     # 字体大小随窗口宽度变化
     font_size = max(9, min(13, int(win_width / 110)))
@@ -121,6 +122,8 @@ def main():
     # 创建并显示主窗口：先摆好位置再 show，免得先在错误位置闪一下
     window = MainWindow()
     window.resize(win_width, win_height)
+    # 高度按首页内容自适应：默认打开就能完整显示，不用滚轮上下滚
+    window.fit_height_to_home(avail.height())
     _center_window(window)
     window.show()
     # show 之后再校正一次：多屏时 primaryScreen 未必是窗口真正所在的那块屏

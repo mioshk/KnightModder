@@ -36,8 +36,6 @@ from ui.styles import DARK_STYLE_SHEET
 from ui.dialogs import (
     show_about_dialog,
     show_path_select_dialog,
-    show_missing_deps_dialog,
-    show_mod_errors_dialog,
     AboutMarkdownDialog,
 )
 from ui.mod_page import ModPage, OnlineModPage
@@ -240,8 +238,10 @@ class MainWindow(QMainWindow):
         screen = QApplication.primaryScreen()
         screen_size = screen.size() if screen else QSize(1920, 1080)
         min_w = int(screen_size.width() * 0.48)
-        min_h = int(screen_size.height() * 0.70)
-        self.setMinimumSize(max(800, min_w), max(550, min_h))
+        # 最小高度按屏幕高度的一半算（此前是七成，窗口在小屏上被撑得老高，
+        # 甚至会顶到任务栏）。下限 520 保证标题栏 + 一屏功能按钮仍放得下。
+        min_h = int(screen_size.height() * 0.50)
+        self.setMinimumSize(max(800, min_w), max(520, min_h))
         self.setStyleSheet(DARK_STYLE_SHEET)
 
         self._drag_pos = None
@@ -251,7 +251,6 @@ class MainWindow(QMainWindow):
         # 业务状态
         self.game_path = ""
         self.resolver = DependencyResolver()
-        self.missing_deps = set()
         self.is_loading = False
         self._dependency_lock = threading.Lock()  # 防止多个刷新线程并发写缓存/数据
         self._last_launch_ts = 0.0  # 启动游戏防抖时间戳
@@ -424,6 +423,7 @@ class MainWindow(QMainWindow):
     def _create_title_bar(self):
         bar = QWidget()
         bar.setObjectName("TitleBar")
+        self._title_bar = bar      # 供 fit_height_to_home 计算窗口所需高度
         bar.setFixedHeight(64)
         bar.mousePressEvent = self._titlebar_mouse_press
         bar.mouseMoveEvent = self._titlebar_mouse_move
@@ -713,6 +713,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.tab_settings_btn)
         nav_layout.addStretch()
 
+        self._nav_bar = nav_bar    # 供 fit_height_to_home 计算窗口所需高度
         return nav_bar
 
     def _create_stack(self):
@@ -794,8 +795,40 @@ class MainWindow(QMainWindow):
 
         content_layout.addWidget(split_widget, stretch=1)
 
+        self._home_content = content   # 供 fit_height_to_home 取内容自然高度
         scroll.setWidget(content)
         return scroll
+
+    def fit_height_to_home(self, max_height: int = 0):
+        """把窗口高度调到「首页内容刚好完整显示」——不用滚轮就能看全。
+
+        首页内容（Hero 卡片 + 常用功能按钮列）的高度会随字号、字体、按钮数量
+        变化，写死一个默认高度不是留一大片白、就是差一点要上下滚。这里直接向
+        布局要它自然需要的高度，再补上标题栏与导航栏。
+        """
+        content = getattr(self, "_home_content", None)
+        if content is None:
+            return
+        layout = content.layout()
+        if layout is not None:
+            # 布局还没算过时 sizeHint 返回的是初始值，先激活一次
+            layout.activate()
+        needed = content.sizeHint().height()
+        if needed <= 0:
+            return
+
+        chrome = 0
+        for bar in (getattr(self, "_title_bar", None),
+                    getattr(self, "_nav_bar", None)):
+            if bar is None:
+                continue
+            chrome += bar.height() or bar.sizeHint().height()
+
+        total = needed + chrome + 8   # +8 避免卡在刚好出现滚动条的临界值
+        if max_height and total > max_height:
+            total = max_height
+        if total > self.minimumHeight():
+            self.resize(self.width(), max(self.minimumHeight(), total))
 
     def _create_hero_card(self):
         card = QFrame()
@@ -958,8 +991,6 @@ class MainWindow(QMainWindow):
             ("📦", "手动安装 Mod", "从本地选择 zip/dll 安装", self._install_mods),
             ("📂", "Mods 文件夹", "打开 Mods 安装目录", self._open_mods),
             ("💾", "存档文件夹", "打开游戏存档所在位置", self._open_save),
-            ("🔍", "检查前置依赖", "扫描已装 Mod 缺失的依赖", self._check_missing_dependencies),
-            ("🛠️", "检查Mod错误", "游戏中出现报错点我", self._check_mod_errors),
             ("🔄", "更新链接", "重新拉取最新 Mod 数据", self._reload_dependency),
         ]
 
@@ -1694,120 +1725,6 @@ class MainWindow(QMainWindow):
                 self._log("❌ Mod 数据更新失败，请检查网络连接后重试", "error")
         except RuntimeError:
             pass
-
-    def _check_missing_dependencies(self):
-        if not self._valid_path():
-            return
-
-        if not self.resolver.is_loaded:
-            QMessageBox.warning(self, "提示", "请先点击「更新链接」加载数据")
-            return
-
-        game_path = self.path_input.text()
-        if game_path.endswith('.exe'):
-            game_path = get_root_from_exe(game_path)
-
-        mods_dir = get_mods_dir(game_path)
-        if not os.path.exists(mods_dir):
-            QMessageBox.information(self, "提示", "Mods 文件夹不存在，请先安装 Mod")
-            return
-
-        self._log("🔍 正在扫描已安装 Mod 的前置依赖...", "info")
-
-        installed_mods = set()
-        for item in os.listdir(mods_dir):
-            item_path = os.path.join(mods_dir, item)
-            if os.path.isdir(item_path):
-                installed_mods.add(item)
-            elif os.path.isfile(item_path) and item.endswith('.dll'):
-                installed_mods.add(os.path.splitext(item)[0])
-
-        if not installed_mods:
-            QMessageBox.information(self, "提示", "Mods 文件夹为空")
-            return
-
-        missing = self.resolver.check_missing_dependencies(installed_mods)
-        self.missing_deps = missing
-
-        if missing is None:
-            return
-
-        if missing:
-            self._log(f"⚠️ 缺失 {len(missing)} 个前置 Mod：{'、'.join(sorted(missing))}", "warning")
-            show_missing_deps_dialog(self, missing, self.resolver)
-        else:
-            self._log("✅ 所有前置依赖完整", "success")
-            QMessageBox.information(self, "检查完成", "所有已安装 Mod 的前置依赖完整！")
-
-    # ==================== Mod错误检查 ====================
-    def _check_mod_errors(self):
-        if not self._valid_path():
-            return
-
-        game_path = self.path_input.text()
-        if game_path.endswith('.exe'):
-            game_path = get_root_from_exe(game_path)
-
-        mods_dir = get_mods_dir(game_path)
-        if not os.path.exists(mods_dir):
-            QMessageBox.information(self, "提示", "Mods 文件夹不存在，请先安装 Mod")
-            return
-
-        self._log("🔍 正在检查 Mod 安装错误...", "info")
-
-        errors = []
-        root_dlls = []
-        dll_owners = {}  # dll文件名 -> [所属文件夹列表]
-
-        try:
-            items = [item for item in os.listdir(mods_dir) if item != "Disabled"]
-        except OSError as e:
-            self._log(f"❌ 无法读取 Mods 目录: {e}", "error")
-            QMessageBox.warning(self, "检查失败", f"无法读取 Mods 目录：\n{e}")
-            return
-
-        for item in items:
-            item_path = os.path.join(mods_dir, item)
-            if os.path.isdir(item_path):
-                dll_files = [f for f in os.listdir(item_path) if f.endswith('.dll')]
-                for dll in dll_files:
-                    name_lower = dll.lower()
-                    if name_lower not in dll_owners:
-                        dll_owners[name_lower] = []
-                    dll_owners[name_lower].append(item)
-            elif os.path.isfile(item_path) and item.endswith('.dll'):
-                root_dlls.append(item)
-
-        if root_dlls:
-            self._log(f"⚠️ Mods 根目录存在 {len(root_dlls)} 个 .dll 文件（不会生效）", "warning")
-            error_msg = "Mods根目录存在 .dll 文件（Mod不会生效）:\n"
-            for dll in root_dlls:
-                error_msg += f"  • {dll}\n"
-            errors.append(error_msg)
-
-        # 同名 dll 检测：同一 dll 名出现在多个不同文件夹
-        dup_dlls = {k: v for k, v in dll_owners.items() if len(v) > 1}
-        if dup_dlls:
-            self._log(f"⚠️ 发现 {len(dup_dlls)} 个同名 .dll 文件冲突", "warning")
-            errors.append(("同名dll文件冲突", dup_dlls))
-
-        if errors:
-            # 有结构化错误（tuple 类型）则用对话框渲染
-            structured_errors = [e for e in errors if isinstance(e, tuple)]
-            plain_errors = [e for e in errors if isinstance(e, str)]
-            if structured_errors:
-                # 把 plain 错误也转成结构化，统一用对话框显示
-                if plain_errors:
-                    structured_errors.append(("Mods根目录存在 .dll 文件", {"_items": plain_errors}))
-                show_mod_errors_dialog(self, structured_errors)
-            else:
-                full_error_msg = "发现以下Mod安装错误:\n\n"
-                for i, error in enumerate(errors, 1):
-                    full_error_msg += f"{i}. {error}\n"
-                QMessageBox.warning(self, "Mod错误检查", full_error_msg)
-        else:
-            self._log("✅ Mod 错误检查通过，未发现异常", "success")
-            QMessageBox.information(self, "检查完成", "所有Mod安装正确，未发现错误！")
 
     # ==================== 窗口事件 ====================
     def closeEvent(self, event):
