@@ -77,8 +77,18 @@ jobs:
           $j = Get-Content version.json -Raw | ConvertFrom-Json
           $files = (Get-ChildItem dist -Filter *.exe).FullName
           if (-not $files) { throw "dist 下没有找到 exe，无法发布 Release" }
-          # 重跑（同一个 tag）时先清掉旧的，保证幂等
-          gh release delete $tag --yes 2>$null
+
+          # 同一个 tag 重跑时先清掉旧 Release。注意 GitHub 的 pwsh 会把
+          # $ErrorActionPreference 设成 Stop，而 gh 在目标不存在时会返回非零
+          # 直接把脚本终止——所以这里只看退出码，不靠 stderr 重定向兜。
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $tag --yes
+            if ($LASTEXITCODE -ne 0) { throw "删除旧 Release 失败" }
+          }
+
           gh release create $tag --title "KnightModder v$($j.version)" `
-            --notes $j.changelog $files
+            --notes "$($j.changelog)" $files
+          if ($LASTEXITCODE -ne 0) { throw "发布 Release 失败" }
+
           gh release view $tag
