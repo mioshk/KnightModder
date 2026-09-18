@@ -272,6 +272,9 @@ class MainWindow(QMainWindow):
 
         self.settings = QSettings("KnightModder", "Settings")
 
+        # API 安装/还原是否正在进行（防连点开出两个并发任务）
+        self._api_busy = False
+
         # ✅ 本次启动是否已询问过（防止重复弹）
         self._asked_this_session = False
 
@@ -960,10 +963,14 @@ class MainWindow(QMainWindow):
             ("🔄", "更新链接", "重新拉取最新 Mod 数据", self._reload_dependency),
         ]
 
+        # 装 API / 还原原版会跑耗时任务，留个引用好在执行期间禁用（防连点）
+        self._api_buttons = {}
         for icon, name, desc, handler in buttons:
             btn = self._make_function_card(icon, name, desc)
             btn.clicked.connect(handler)
             button_layout.addWidget(btn)
+            if handler in (self._install_api, self._restore):
+                self._api_buttons[handler] = btn
 
         layout.addLayout(button_layout)
         layout.addStretch()
@@ -1430,8 +1437,25 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "启动失败", f"无法唤起 Steam：{e}\n请手动打开 Steam 库启动游戏。")
 
     # ==================== 功能按钮回调 ====================
+    def _set_api_busy(self, busy: bool, msg: str = ""):
+        """API 安装/还原进行中：禁用相关按钮，并立刻打一行日志。
+
+        这两个操作的第一步是联网读清单，中间好几秒界面没有任何输出，用户会以为
+        没生效而反复点击 —— 实测那样会并发跑出两个任务，抢同一个下载临时文件
+        （[WinError 5] 拒绝访问），最后还弹出一个莫名其妙的"安装失败"。
+        所以点下去的瞬间就要有反馈，同时把按钮锁住。
+        """
+        self._api_busy = busy
+        for btn in getattr(self, "_api_buttons", {}).values():
+            btn.setEnabled(not busy)
+        if msg:
+            self._log(msg, "info")
+
     def _install_api(self):
         if not self._valid_path():
+            return
+        if self._api_busy:
+            self._log("⚠️ 已有 API 任务在进行中，请等它结束", "warn")
             return
 
         try:
@@ -1442,6 +1466,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "失败", str(e))
             return
 
+        # 先给反馈再开线程，别让用户对着"没反应"的界面连点
+        self._set_api_busy(True, "⏳ 正在安装 Modding API，请稍候…")
         # 下载/解压可能耗时数秒~数分钟，放到后台线程避免冻结 UI
         threading.Thread(target=self._api_install_task, args=(game_path,), daemon=True).start()
 
@@ -1463,6 +1489,9 @@ class MainWindow(QMainWindow):
     def _restore(self):
         if not self._valid_path():
             return
+        if self._api_busy:
+            self._log("⚠️ 已有 API 任务在进行中，请等它结束", "warn")
+            return
 
         try:
             game_path = self.path_input.text()
@@ -1472,6 +1501,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "失败", str(e))
             return
 
+        self._set_api_busy(True, "⏳ 正在还原原版，请稍候…")
         threading.Thread(target=self._api_restore_task, args=(game_path,), daemon=True).start()
 
     def _api_restore_task(self, game_path):
@@ -1497,7 +1527,9 @@ class MainWindow(QMainWindow):
             self.api_finished.emit(False, f"还原失败：{e}")
 
     def _on_api_finished(self, success, msg):
-        """安装/还原完成（主线程）：弹窗反馈"""
+        """安装/还原完成（主线程）：恢复按钮 + 弹窗反馈"""
+        # 先解锁按钮：下面有 isVisible 早退，放在它后面会导致按钮被永久禁用
+        self._set_api_busy(False)
         try:
             if not self.isVisible():
                 return

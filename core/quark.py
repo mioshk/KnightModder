@@ -1012,7 +1012,11 @@ class QuarkClient:
             self.poll_task(task_id, on_wait=_wait_tick)
             self.status_callback("转存完成，正在获取下载地址...", "success")
         else:
-            self.status_callback("云端已存在相同文件，直接复用，无需重复转存", "success")
+            # own_fid 非空时上面已经说过"文件已在您网盘中，跳过转存"，
+            # 这里再讲一遍就成了同一件事的两条日志，看着很乱。
+            if not own_fid:
+                self.status_callback("云端已存在相同文件，直接复用，无需重复转存",
+                                     "success")
 
         # 定位本次要下载的文件：优先取"本次新转存进来"的 fid，避免取到旧的同名文件
         after_index = self._list_file_index(target_fid) if to_save else before_index

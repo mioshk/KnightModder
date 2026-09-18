@@ -9,6 +9,7 @@ import re
 import json
 import shutil
 import subprocess
+import threading
 import zipfile
 import hashlib
 import xml.etree.ElementTree as ET
@@ -328,13 +329,34 @@ def _resolve_api_package(status_callback, progress_callback):
     raise RuntimeError("API 所有下载链接均不可用：" + "；".join(errors))
 
 
+# API 安装与还原共用一把锁：两者操作的是同一批 dll（.v/.m/Current 三份互换），
+# 并发执行会把备份改乱；下载时还会抢同一个 .part 临时文件（实测报
+# [WinError 5] 拒绝访问）。UI 层已经禁了按钮，这里再兜一层，命令行等其它入口
+# 重复调用也安全。
+_API_LOCK = threading.Lock()
+
+
 def install_api(game_path, status_callback=None, progress_callback=None):
+    """安装 / 启用 Modding API（线程安全包装，真正逻辑在 _install_api_locked）"""
+    if not _API_LOCK.acquire(blocking=False):
+        raise RuntimeError("已有 API 安装/还原任务在进行中，请等它结束后再操作")
+    try:
+        return _install_api_locked(game_path, status_callback, progress_callback)
+    finally:
+        _API_LOCK.release()
+
+
+def _install_api_locked(game_path, status_callback=None, progress_callback=None):
     """
     安装 / 启用 Modding API（对齐 Lumafly 的「安装即备份、开关靠互换」机制）：
-      - 全新安装：先备份当前原版 dll -> .v；下载/解压 API 包覆盖 Managed；再备份
+      - 全新安装：备份当前原版 dll -> .v；下载/解压 API 包覆盖 Managed；再备份
         模组版 dll -> .m。
-      - 已装但被关：直接把模组版 .m 切回 Current（无需下载）。
-      - 已启用：幂等，无操作（仅确保 .m 备份存在）。
+      - 已装但被关：把 .m（模组版）装回 Current，无需重新下载。
+      - 已启用：幂等，无操作（确保 .m 备份存在）。
+
+    ⚠️ 两份备份 .v / .m 必须**常驻**：切换一律用复制，不用移动。早先是"互换"
+    （shutil.move），结果启用后 .m 没了、还原后 .v 没了，任何时刻都只剩一份
+    备份，用户误删一个就得重新下载 API。
     """
     status_callback = status_callback or (lambda *a: None)
     managed = get_managed_dir(game_path)
@@ -343,25 +365,29 @@ def install_api(game_path, status_callback=None, progress_callback=None):
     state = get_api_state(game_path)
 
     if state["enabled"]:
-        # 已启用：确保模组版备份存在，便于日后「还原原版」互换
+        # 已启用：确保两份备份都在
         if os.path.isfile(cur) and not os.path.isfile(mod):
             shutil.copy2(cur, mod)
+        if not os.path.isfile(van):
+            status_callback(
+                "⚠️ 缺少原版备份 .v，将无法离线还原；可用 Steam「验证游戏完整性」"
+                "恢复官方文件后重新安装 API", "warn")
         status_callback("Modding API 已处于启用状态", "info")
         return state
 
     if state["has_api"] and not state["enabled"]:
-        # 已装但被关：当前是原版 -> 备份为 .v，再把 .m 切回 Current
-        if os.path.isfile(cur) and not os.path.isfile(van):
+        # 已装但被关：当前是原版 -> 补一份 .v，再把 .m（模组版）装回 Current
+        if os.path.isfile(cur) and (not os.path.isfile(van) or _is_modded_dll(van)):
             shutil.copy2(cur, van)
-        if os.path.isfile(cur):
-            shutil.move(cur, van)
-        shutil.move(mod, cur)
+        # 复制而不是移动：.m 必须留在原地，否则下次"关闭再启用"就没得用了
+        shutil.copy2(mod, cur)
         status_callback("已重新启用 Modding API（模组版）", "success")
         return get_api_state(game_path)
 
     # —— 全新安装 ——
-    # 1) 备份用户自己的原版 dll（仅当当前确为原版且尚无备份）
-    if os.path.isfile(cur) and not _is_modded_dll(cur) and not os.path.isfile(van):
+    # 1) 备份用户自己的原版 dll（当前确为原版，且尚无备份或那份备份不是原版）
+    if os.path.isfile(cur) and not _is_modded_dll(cur) and (
+            not os.path.isfile(van) or _is_modded_dll(van)):
         shutil.copy2(cur, van)
 
     # 2) 取得安装包（本地缓存优先，否则夸克下载）并解压覆盖 Managed
@@ -378,11 +404,24 @@ def install_api(game_path, status_callback=None, progress_callback=None):
 
 
 def restore_vanilla(game_path, status_callback=None):
+    """还原原版（线程安全包装，真正逻辑在 _restore_vanilla_locked）"""
+    if not _API_LOCK.acquire(blocking=False):
+        raise RuntimeError("已有 API 安装/还原任务在进行中，请等它结束后再操作")
+    try:
+        return _restore_vanilla_locked(game_path, status_callback)
+    finally:
+        _API_LOCK.release()
+
+
+def _restore_vanilla_locked(game_path, status_callback=None):
     """
     还原原版（对齐 Lumafly 的「关掉 API」= 把原版 dll 切回 Current）：
-      - 若 .v 原版备份存在：Current(模组) -> .m，.v -> Current，游戏加载原版。
+      - 若 .v 原版备份存在：Current(模组) 另存为 .m，.v 装回 Current，游戏加载原版。
       - 若 .v 缺失：无法离线还原，返回 {"ok": False, "reason": "no_vanilla_backup"}，
         由调用方提示用户用 Steam「验证游戏完整性」恢复官方原版。
+
+    ⚠️ 两份备份 .v / .m 常驻：这里用复制而不是移动，还原完 .v 仍然留在原地，
+    否则一关一开就会把原版备份消耗掉。
     """
     status_callback = status_callback or (lambda *a: None)
     managed = get_managed_dir(game_path)
@@ -398,9 +437,11 @@ def restore_vanilla(game_path, status_callback=None):
     if not state["has_vanilla_backup"]:
         return {"ok": False, "reason": "no_vanilla_backup"}
 
-    # 互换：Current(模组) -> .m；.v -> Current
-    shutil.move(cur, mod)
-    shutil.move(van, cur)
+    # 先把当前模组版另存为 .m，再把 .v（原版）装回 Current。
+    # 都用复制：两份备份常驻，来回切换多少次都不会少一份。
+    if os.path.isfile(cur) and (not os.path.isfile(mod) or not _is_modded_dll(mod)):
+        shutil.copy2(cur, mod)
+    shutil.copy2(van, cur)
     status_callback("✅ 已还原为原版游戏（Modding API 已关闭）", "success")
     return {"ok": True, "already_vanilla": False}
 
