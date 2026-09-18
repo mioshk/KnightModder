@@ -74,3 +74,7 @@ jobs:
           name: KnightModder v${{ steps.ver.outputs.version }}
           body: ${{ steps.ver.outputs.note }}
           files: dist/*.exe
+        env:
+          # 必须显式给 token：只配 permissions 不够，这个 action 拿不到写权限
+          # 就会在「发布 Release」这一步直接失败（构建本身是成功的）。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
