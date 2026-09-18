@@ -1,5 +1,7 @@
 /crash.log
 /dist
+# 所有层级的 __pycache__（tests/ 下的之前没覆盖到，导致 pyc 被误提交）
+**/__pycache__/
 /KnightModder.spec
 /__pycache__
 /build.bat

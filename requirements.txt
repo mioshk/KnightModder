@@ -1,4 +1,12 @@
-# 运行依赖
-PySide6>=6.5
-psutil>=5.9
-requests>=2.28
+# ---------- 运行依赖 ----------
+PySide6>=6.5          # 界面
+psutil>=5.9           # 进程检测（判断游戏是否在运行）
+requests>=2.28        # 网络请求（ModLinks / 更新检查 / API 下载）
+qrcode>=7.4           # 更新弹窗里的夸克链接二维码
+packaging>=23.0       # 版本号比较（检查更新时用）
+pywebview>=5.0        # 夸克登录窗口（用系统 Edge/WebView2 内核，不再自带浏览器）
+pythonnet>=3.0        # pywebview 的 Windows 后端需要 clr（WinForms + WebView2）
+
+# ---------- 构建依赖 ----------
+# 只有打包时才需要；运行程序本身不需要装
+PyInstaller>=6.0

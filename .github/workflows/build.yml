@@ -1,10 +1,11 @@
-name: Build (Windows)
+name: 构建安装包
 
+# 推送到 main 即构建一次；也可以在 GitHub 的 Actions 页面手动点「Run workflow」。
+# 打 v* 标签时额外把它发布成 Release（两个 exe 作为附件）。
 on:
-  # 只在推 tag 时构建并发布 Release；推 main 不再触发，避免产生无 Release 的冗余构建。
-  # 需要手动构建时用 workflow_dispatch。
   push:
-    tags: ["v*"]
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -13,52 +14,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - name: Install dependencies
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
 
-      - name: Build single-file executable (PyInstaller)
-        run: pyinstaller --noconfirm main.spec
-
-      - name: Rename artifact
+      - name: 读取版本号
+        id: ver
         shell: pwsh
         run: |
-          $ver = $env:GITHUB_REF_NAME -replace '^v',''
-          $exe = Get-Item dist\KnightModder* | Select-Object -First 1
-          $ext = $exe.Extension
-          Rename-Item $exe.FullName -NewName "KnightModder-v$ver-windows$ext"
+          $v = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本: $v"
 
-      - name: Upload artifact
+      # 绿色单文件版：dist/KnightModder v<版本> 绿色版.exe
+      - name: 构建绿色版
+        run: pyinstaller --noconfirm main.spec
+
+      # 安装版：内部会先跑 onedir，再压成 payload，最后打成单文件安装器
+      # 产出 dist/KnightModder v<版本> 安装版.exe
+      - name: 构建安装版
+        run: python build_installer.py
+
+      - name: 列出产物
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Filter *.exe |
+            ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length/1MB) }
+
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: KnightModder-Windows
-          path: |
-            dist/KnightModder*
+          name: KnightModder-v${{ steps.ver.outputs.version }}
+          path: dist/*.exe
           if-no-files-found: error
 
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create GitHub Release
+      # 只有打标签时才发 Release，避免每次 push 都生成一个发布版本
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
-          remove: true
-          generate_release_notes: true
+          name: KnightModder v${{ steps.ver.outputs.version }}
+          files: dist/*.exe

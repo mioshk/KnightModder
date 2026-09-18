@@ -562,11 +562,14 @@ class ModListItemWidget(QWidget):
         bg_layout.addStretch()
 
         # 「待更新」按钮：本地 Mod 有可用更新时显示（点击切到在线页去更新）
-        self.action_btn = QPushButton()
+        # 必须带 parent：_update_action_btn() 里会 setVisible(True)，而这一刻按钮
+        # 还没被 addWidget——没有父控件的 QPushButton 一旦 setVisible(True)，Qt 会
+        # 把它当成独立顶层窗口弹出来，表现就是切页时闪过一个空白小方块。
+        self.action_btn = QPushButton(self)
         self.action_btn.setFixedSize(64, 28)
         self.action_btn.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self._update_action_btn()
         bg_layout.addWidget(self.action_btn)
+        self._update_action_btn()   # 挂进布局后再定状态/可见性
 
         self.status_label = QLabel("已启用" if enabled else "已禁用")
         self.status_label.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
@@ -749,11 +752,12 @@ class OnlineModListItemWidget(QWidget):
 
         bg_layout.addStretch()
 
-        self.action_btn = QPushButton()
+        # 同上：带 parent 创建 + 先挂布局再定可见性，避免按钮以顶层窗口身份闪现
+        self.action_btn = QPushButton(self)
         self.action_btn.setFixedSize(64, 28)
         self.action_btn.setFont(QFont("Microsoft YaHei", 10, QFont.Bold))
-        self._update_action_btn()
         bg_layout.addWidget(self.action_btn)
+        self._update_action_btn()
 
         main_layout.addWidget(self.bg_frame)
         self.setFixedHeight(58)
@@ -1740,7 +1744,9 @@ class ModDetailPanel(QWidget):
 
         悬浮提示自己控制：进入后等 _TOOLTIP_WAKE_DELAY_MS 就弹出，离开立即收起。
         """
-        lbl = QLabel("")
+        # 带 parent 创建：这个标签稍后会被 setVisible(True)，要是那一刻还没挂进
+        # 布局，无父控件的它就会以独立顶层窗口闪一下（跟 action_btn 同一个坑）。
+        lbl = QLabel(self)
         lbl.setFixedSize(20, 20)
         lbl.setAlignment(Qt.AlignCenter)
         lbl.setStyleSheet("background: transparent; border: none;")
