@@ -22,7 +22,7 @@ from config import (
     API_QUARK_LINKS,
     API_ZIP_MAP,
 )
-from utils.common import fetch_remote_content, get_base_dir
+from utils.common import fetch_remote_content, get_asset_path, get_base_dir
 
 
 class ApiPackage:
@@ -50,8 +50,25 @@ class ApiPackage:
 
 
 def _local_manifest_path():
-    """程序自带的那份清单（源码运行 = 项目根目录；打包后 = exe 同目录）"""
-    return os.path.join(get_base_dir(), API_MANIFEST_FILE)
+    """程序自带的那份清单的完整路径；找不到就返回空串。
+
+    不能只认 exe 同目录：PyInstaller 6 会把 datas 统统放进 `_internal/`
+    （onedir，也就是安装版）或 `_MEIPASS`（onefile，绿色版），而不是 exe 同级。
+    实测安装完根目录根本没有 api_manifest.json，只按 get_base_dir() 找的话，
+    离线兜底这一级等于形同虚设，会一路退到 config 里的内置配置。
+    """
+    candidates = [
+        os.path.join(get_base_dir(), API_MANIFEST_FILE),               # 源码 / 根目录
+        os.path.join(get_base_dir(), "_internal", API_MANIFEST_FILE),  # onedir
+    ]
+    try:
+        candidates.append(get_asset_path(API_MANIFEST_FILE))           # onefile 的 _MEIPASS
+    except Exception:  # noqa: BLE001
+        pass
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
 
 
 def _builtin_manifest():

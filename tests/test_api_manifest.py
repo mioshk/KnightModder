@@ -83,6 +83,34 @@ class ApiManifestTests(unittest.TestCase):
         self.assertEqual(m["source"], "local")
         self.assertIn("Windows", m["packages"])
 
+    def test_local_manifest_also_looks_inside_internal(self):
+        """PyInstaller 6 把 datas 放进 _internal/，兜底查找必须覆盖到那里。
+
+        实测安装版装完后 api_manifest.json 在 _internal/ 下，只按 exe 同目录找
+        会找不到，离线兜底这一级就废了。
+        """
+        from core import api_manifest as am
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "_internal"), exist_ok=True)
+        p = os.path.join(d, "_internal", "api_manifest.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(SAMPLE, f)
+        with mock.patch.object(am, "get_base_dir", return_value=d), \
+                mock.patch.object(am, "get_asset_path",
+                                  return_value=os.path.join(d, "nope.json")):
+            found = am._local_manifest_path()
+        self.assertTrue(found, "应能在 _internal 下找到清单")
+        self.assertEqual(os.path.abspath(found), os.path.abspath(p))
+
+    def test_local_manifest_missing_returns_empty(self):
+        """哪儿都没有时返回空串，让上层继续退到内置配置"""
+        from core import api_manifest as am
+        d = tempfile.mkdtemp()
+        with mock.patch.object(am, "get_base_dir", return_value=d), \
+                mock.patch.object(am, "get_asset_path",
+                                  return_value=os.path.join(d, "nope.json")):
+            self.assertEqual(am._local_manifest_path(), "")
+
     def test_broken_remote_json_falls_back(self):
         """线上清单被改坏（比如手抖写错 JSON）时不能让安装直接崩掉"""
         from core import api_manifest as am
