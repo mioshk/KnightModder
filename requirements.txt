@@ -6,6 +6,7 @@ qrcode>=7.4           # 更新弹窗里的夸克链接二维码
 packaging>=23.0       # 版本号比较（检查更新时用）
 pywebview>=5.0        # 夸克登录窗口（用系统 Edge/WebView2 内核，不再自带浏览器）
 pythonnet>=3.0        # pywebview 的 Windows 后端需要 clr（WinForms + WebView2）
+markdown-it-py>=3.0   # README / 关于 / 使用教程 的 Markdown 渲染（比 Qt 原生排版好得多）
 
 # ---------- 构建依赖 ----------
 # 只有打包时才需要；运行程序本身不需要装

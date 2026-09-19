@@ -42,6 +42,7 @@ from config import (
     COLOR_BORDER,
 )
 from ui.styles import DARK_STYLE_SHEET
+from ui.md_render import MarkdownBrowser
 
 
 def _apply_icon(dialog):
@@ -220,12 +221,13 @@ class AboutMarkdownDialog(QDialog):
         sep.setStyleSheet("background-color: #333333; max-height: 1px; border: none;")
         layout.addWidget(sep)
 
-        self.content_area = QTextBrowser()
-        self.content_area.setOpenExternalLinks(True)
+        # 用统一的 Markdown 渲染器：markdown-it 转 HTML + 暗色样式表，
+        # 比 Qt 原生 setMarkdown 的排版（标题与正文同字号、行距挤在一起）好看得多
+        self.content_area = MarkdownBrowser()
         self.content_area.setStyleSheet("""
             QTextBrowser {
-                background-color: #1e1e1e;
-                border: 1px solid #333333;
+                background-color: #1c1c20;
+                border: 1px solid #33333c;
                 border-radius: 8px;
                 padding: 16px 18px;
             }
@@ -254,9 +256,9 @@ class AboutMarkdownDialog(QDialog):
 
     def _on_content_loaded(self, success, content):
         if success and content:
-            self.content_area.setMarkdown(content)
+            self.content_area.set_markdown(content)
         else:
-            self.content_area.setMarkdown(self._get_default_content())
+            self.content_area.set_markdown(self._get_default_content())
 
         version = self._extract_version(content if success else "")
         if version:

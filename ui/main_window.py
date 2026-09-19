@@ -273,6 +273,8 @@ class MainWindow(QMainWindow):
 
         # API 安装/还原是否正在进行（防连点开出两个并发任务）
         self._api_busy = False
+        # 游戏版本校验结果：True=通过 / False=不符 / None=尚未校验
+        self._version_ok = None
 
         # ✅ 本次启动是否已询问过（防止重复弹）
         self._asked_this_session = False
@@ -382,6 +384,105 @@ class MainWindow(QMainWindow):
         self.game_path = root
         self.path_input.setText(self._display_path(root))
         save_path(root)
+        self._refresh_version_status()
+
+    def _set_version_bar(self, state, text, tip=""):
+        """更新首页 Hero 区的版本校验状态：绿=通过 / 橙=不符 / 灰=未校验。
+
+        刻意不画卡片、不画圆角边框、不占整行——只用彩色结论文字本身表达状态，
+        宽度由文字决定，看起来像一行正常的状态说明而不是一个被框住的提示条。
+        完整指引仍挂在 tooltip 上。
+        """
+        scheme = {
+            "ok": ("#34c759", "可以安装 API 与启动游戏"),
+            "bad": ("#ff453a",
+                    "Steam 库右键游戏 → 属性 → 游戏版本及测试版 → 选择 1.5.78.11833"),
+            "none": ("#8a8a8a", "请先在上方指定 hollow_knight.exe 所在位置"),
+        }
+        fg, sub_default = scheme.get(state, scheme["none"])
+        self.version_status_label.setText(text)
+        self.version_status_label.setStyleSheet(
+            f"color: {fg}; background: transparent; border: none;"
+            f" font-size: 13px; font-weight: 600;"
+            f" letter-spacing: 0.2px;")
+        sub = self.version_sub_label
+        sub.setText(sub_default or "")
+        sub.setVisible(bool(sub_default))
+        # 副说明固定灰色：状态色只留给结论，避免整行都在喊
+        sub.setStyleSheet(
+            "color: rgba(255, 255, 255, 0.45); background: transparent;"
+            " border: none; font-size: 12px; font-weight: 400;")
+        # 无副文案时连分隔线一起收起，不留悬空的竖线
+        self.version_divider.setVisible(bool(sub_default))
+        # 容器透明无边框：样式必须用 objectName 限定，裸写 QFrame 会命中内部
+        # 所有后代 QFrame（QLabel 就是 QFrame 的子类），把文字也套上边框。
+        self.version_bar.setStyleSheet(
+            "QFrame#VersionBar { background: transparent; border: none; }")
+        tip = tip or text
+        self.version_bar.setToolTip(tip)
+        self.version_sub_label.setToolTip(tip)
+        self.version_status_label.setToolTip(tip)
+
+    def _sync_api_buttons(self):
+        """决定「安装 API / 还原原版」能否点击。
+
+        两个条件：游戏版本校验通过（不是 False），并且当前没有 API 任务在跑。
+        """
+        allowed = (getattr(self, "_version_ok", None) is not False) \
+            and not getattr(self, "_api_busy", False)
+        for btn in getattr(self, "_api_buttons", {}).values():
+            btn.setEnabled(allowed)
+            btn.setCursor(Qt.PointingHandCursor if allowed else Qt.ForbiddenCursor)
+            # 卡片内部是子 QLabel，父按钮 setEnabled 不会改变它们的颜色，
+            # 必须逐个同步，否则禁用后文字仍亮着，看不出点不了。
+            for child in btn.findChildren(QLabel):
+                child.setEnabled(allowed)
+
+    def _refresh_version_status(self):
+        """校验游戏版本：刷新状态栏，并按结果启用/禁用相关按钮。
+
+        判定依据是原版 Assembly-CSharp.dll 的哈希（见 core/game_version.py），
+        只看游戏文件本身，所以 Steam / GOG / 手动解压版一视同仁。
+        """
+        if not hasattr(self, "version_bar"):
+            return
+        root = self.game_path or self.path_input.text().strip()
+        if not root:
+            self._version_ok = None
+            self._set_version_bar("none", "未选择游戏路径", "")
+            self._sync_api_buttons()
+            return
+        if root.endswith('.exe'):
+            root = get_root_from_exe(root)
+
+        try:
+            from core.game_version import check_game_version
+            result = check_game_version(root)
+        except Exception as e:  # noqa: BLE001 校验本身出错不该影响其它功能
+            self._version_ok = None
+            self._set_version_bar("none", "校验出错", f"版本校验出错：{e}")
+            self._log(f"⚠️ 游戏版本校验出错：{e}", "warn")
+            self._sync_api_buttons()
+            return
+
+        if result["ok"]:
+            self._version_ok = True
+            self._set_version_bar("ok", result["message"], "可以安装 API 与启动游戏")
+        else:
+            self._version_ok = False
+            # 胶囊写完整结论；"怎么退回 1.5.78"的操作指引放 tooltip
+            self._set_version_bar(
+                "bad", result["message"],
+                "Steam 库右键游戏 → 属性 → 游戏版本及测试版 → 选择 1.5.78.11833")
+
+        # 同一路径 + 同一结论不重复刷日志（来回切路径时会把日志刷屏）
+        stamp = (root, result["ok"])
+        if stamp != getattr(self, "_version_log_stamp", None):
+            self._version_log_stamp = stamp
+            self._log(("✅ " if result["ok"] else "❌ ") + result["message"],
+                      "success" if result["ok"] else "error")
+
+        self._sync_api_buttons()
 
     # ==================== UI 构建（完全原样） ====================
     def _setup_ui(self):
@@ -458,20 +559,7 @@ class MainWindow(QMainWindow):
         """)
         layout.addWidget(title)
 
-        announcement = QLabel("📢 仅限 1.5.78 版本游戏！")
-        announcement.setObjectName("announcementLabel")
-        announcement.setFixedHeight(28)
-        announcement.setStyleSheet("""
-            font-size: 12px;
-            font-weight: 600;
-            color: #ff9800;
-            background: rgba(255, 152, 0, 0.1);
-            border: 1px solid rgba(255, 152, 0, 0.3);
-            border-radius: 12px;
-            padding: 4px 12px;
-        """)
-        layout.addWidget(announcement)
-
+        # 标题栏不再放版本校验状态（改为显示在首页 Hero 区，见 _create_hero_card）
         layout.addStretch()
 
         tutorial_btn = QPushButton("📖 使用教程")
@@ -865,33 +953,58 @@ class MainWindow(QMainWindow):
         left_col.setSpacing(10)
 
         head_row = QHBoxLayout()
-        head_title = QLabel("请先把你的游戏退回至 1.5.78 版本")
+        head_row.setSpacing(12)
+        head_title = QLabel("选择你的游戏位置")
         head_title.setObjectName("headingLabel")
         head_title.setStyleSheet("""
-            font-size: 18px;
-            font-weight: 600;
+            font-size: 19px;
+            font-weight: 700;
             color: #ffffff;
+            letter-spacing: 0.4px;
             background: transparent;
         """)
         head_row.addWidget(head_title)
+
+        # 次级说明：注明须选中可执行文件本体，而非所在文件夹。
+        # 用降饱和的暖橙 + 常规字重，避免和第二行的版本状态抢视觉重心。
+        exe_hint = QLabel("选中 hollow_knight.exe 可执行文件")
+        exe_hint.setObjectName("exeHintLabel")
+        exe_hint.setStyleSheet("""
+            color: rgba(255, 149, 0, 0.75);
+            font-size: 12px;
+            font-weight: 500;
+            background: transparent;
+            padding-top: 3px;
+        """)
+        head_row.addWidget(exe_hint)
+
+        # 游戏版本校验状态：单独占标题行下面的一行（见下方 left_col.addWidget）。
+        # 宽度只按内容伸展（Maximum），绝不铺满整行。
+        self.version_bar = QFrame()
+        self.version_bar.setObjectName("VersionBar")
+        self.version_bar.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        bar_layout = QHBoxLayout(self.version_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(10)
+        self.version_status_label = QLabel("")
+        bar_layout.addWidget(self.version_status_label)
+        # 细竖线分隔结论与补充说明，比圆点轻，也不引入额外语义
+        self.version_divider = QFrame()
+        self.version_divider.setObjectName("VersionDivider")
+        self.version_divider.setFixedWidth(1)
+        self.version_divider.setFixedHeight(11)
+        self.version_divider.setStyleSheet(
+            "QFrame#VersionDivider { background: rgba(255, 255, 255, 0.18);"
+            " border: none; }")
+        bar_layout.addWidget(self.version_divider)
+        self.version_sub_label = QLabel("")
+        bar_layout.addWidget(self.version_sub_label)
+        self._set_version_bar("none", "未选择游戏路径", "")
         head_row.addStretch()
 
-        self.version_status_label = QLabel("")
-        self.version_status_label.setObjectName("statusLabel")
-        head_row.addWidget(self.version_status_label)
-
         left_col.addLayout(head_row)
-
-        desc = QLabel("选择你的《空洞骑士》hollow_knight.exe路径，即可一键安装 API 与 Mod")
-        desc.setObjectName("subtitleLabel")
-        desc.setWordWrap(True)
-        desc.setStyleSheet("""
-            font-size: 14px;
-            color: #999999;
-            background: transparent;
-            line-height: 1.5;
-        """)
-        left_col.addWidget(desc)
+        # 校验状态单独占下一行，宽度仍按内容伸展，不铺满整行
+        left_col.addWidget(self.version_bar, 0, Qt.AlignLeft)
 
         top_layout.addLayout(left_col, stretch=3)
 
@@ -962,6 +1075,7 @@ class MainWindow(QMainWindow):
         path_row.addWidget(browse_btn)
 
         main_layout.addLayout(path_row)
+
         return card
 
     def _create_function_grid(self):
@@ -1030,6 +1144,10 @@ class MainWindow(QMainWindow):
             QPushButton#btnFuncCard:pressed {
                 background: rgba(255, 255, 255, 0.04);
             }
+            QPushButton#btnFuncCard:disabled {
+                background: rgba(255, 255, 255, 0.01);
+                border: 1px solid rgba(255, 255, 255, 0.05);
+            }
         """)
 
         inner_layout = QHBoxLayout(btn)
@@ -1037,12 +1155,18 @@ class MainWindow(QMainWindow):
         inner_layout.setSpacing(14)
 
         icon_label = QLabel(icon)
+        icon_label.setObjectName("FuncCardIcon")
         icon_label.setFixedSize(40, 40)
         icon_label.setAlignment(Qt.AlignCenter)
         icon_label.setStyleSheet("""
-            background: rgba(102, 187, 106, 0.1);
-            border-radius: 10px;
-            font-size: 22px;
+            QLabel#FuncCardIcon {
+                background: rgba(102, 187, 106, 0.1);
+                border-radius: 10px;
+                font-size: 22px;
+            }
+            QLabel#FuncCardIcon:disabled {
+                background: rgba(255, 255, 255, 0.03);
+            }
         """)
         inner_layout.addWidget(icon_label)
 
@@ -1050,20 +1174,21 @@ class MainWindow(QMainWindow):
         text_layout.setSpacing(2)
 
         name_label = QLabel(name)
+        name_label.setObjectName("FuncCardName")
         name_label.setStyleSheet("""
-            color: #ffffff;
-            font-size: 14px;
-            font-weight: 600;
-            background: transparent;
+            QLabel#FuncCardName { color: #ffffff; font-size: 14px;
+                font-weight: 600; background: transparent; }
+            QLabel#FuncCardName:disabled { color: rgba(255, 255, 255, 0.28); }
         """)
         name_label.setAlignment(Qt.AlignLeft)
         text_layout.addWidget(name_label)
 
         desc_label = QLabel(desc)
+        desc_label.setObjectName("FuncCardDesc")
         desc_label.setStyleSheet("""
-            color: #888888;
-            font-size: 12px;
-            background: transparent;
+            QLabel#FuncCardDesc { color: #888888; font-size: 12px;
+                background: transparent; }
+            QLabel#FuncCardDesc:disabled { color: rgba(255, 255, 255, 0.16); }
         """)
         desc_label.setWordWrap(False)
         desc_label.setAlignment(Qt.AlignLeft)
@@ -1240,11 +1365,10 @@ class MainWindow(QMainWindow):
 
     # ==================== 游戏进程检测与停止 ====================
     def _find_game_process(self):
-        """检测 hollow_knight 进程（跨平台）。
+        """检测 hollow_knight 进程。
 
-        psutil 为主（所有平台），Windows 下再用 tasklist 兜底：
-        - tasklist 能列出其他会话/用户的进程，补 psutil 因权限漏检的情况；
-        - macOS / Linux 无 tasklist 命令，依赖 psutil 即可（游戏与安装器同为当前用户）。
+        psutil 为主，再用 tasklist 兜底：
+        - tasklist 能列出其他会话/用户的进程，补 psutil 因权限漏检的情况。
         进程名匹配放宽：hollow_knight.exe / hollow_knight / Hollow Knight 等均可命中。
         """
         import subprocess
@@ -1253,7 +1377,7 @@ class MainWindow(QMainWindow):
             n = (name or '').lower()
             return 'hollow' in n and 'knight' in n
 
-        # ① psutil 枚举（跨平台，覆盖当前用户进程）
+        # ① psutil 枚举（覆盖当前用户进程）
         psutil_enumerated = False
         try:
             import psutil  # 延迟导入，避免拖慢启动
@@ -1275,21 +1399,20 @@ class MainWindow(QMainWindow):
             return None
 
         # ② tasklist 兜底（仅 psutil 不可用/枚举失败时；Windows 同样可列出其他会话）
-        if sys.platform == "win32":
-            try:
-                out = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                for line in out.stdout.splitlines():
-                    parts = [p.strip('" ') for p in line.strip().split('","')]
-                    if parts and parts[0].lower() == 'hollow_knight.exe' and len(parts) >= 2 and parts[1].isdigit():
-                        pid = int(parts[1])
-                        # 构造兼容 proc.info['pid'] / proc.info['name'] 的对象
-                        return type("Proc", (), {"info": {"pid": pid, "name": "hollow_knight.exe"}})()
-            except Exception as e:
-                self._log(f"进程检测(tasklist)异常: {e}", "error")
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            for line in out.stdout.splitlines():
+                parts = [p.strip('" ') for p in line.strip().split('","')]
+                if parts and parts[0].lower() == 'hollow_knight.exe' and len(parts) >= 2 and parts[1].isdigit():
+                    pid = int(parts[1])
+                    # 构造兼容 proc.info['pid'] / proc.info['name'] 的对象
+                    return type("Proc", (), {"info": {"pid": pid, "name": "hollow_knight.exe"}})()
+        except Exception as e:
+            self._log(f"进程检测(tasklist)异常: {e}", "error")
 
         return None
 
@@ -1356,6 +1479,14 @@ class MainWindow(QMainWindow):
         if game_path.endswith('.exe'):
             game_path = get_root_from_exe(game_path)
 
+        # 版本门禁：不是 1.5.78 一律不许启动（判定依据见 core/game_version.py）
+        from core.game_version import check_game_version
+        ver = check_game_version(game_path)
+        if not ver["ok"]:
+            self._log(f"❌ {ver['message']}", "error")
+            QMessageBox.warning(self, "无法启动游戏", ver["message"])
+            return
+
         # 防抖：2 秒内禁止重复触发（双击/连点导致 clicked 连发）
         now = time.time()
         if now - self._last_launch_ts < 2:
@@ -1397,15 +1528,11 @@ class MainWindow(QMainWindow):
             if not exe_path:
                 QMessageBox.warning(self, "启动失败", "未找到游戏可执行文件，请确认游戏路径设置正确")
                 return
-            if sys.platform == "darwin":
-                # macOS 必须经由 open 启动 .app（直接 Popen .app 路径无效）
-                self.game_process = subprocess.Popen(["open", exe_path])
-            else:
-                self.game_process = subprocess.Popen(
-                    [exe_path],
-                    cwd=game_path,
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0
-                )
+            self.game_process = subprocess.Popen(
+                [exe_path],
+                cwd=game_path,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
             self.game_pid = self.game_process.pid
             # 立即锁定按钮为「停止游戏」状态，防止 Unity 进程出现前的窗口期重复点击
             self.launch_btn.update_style(True)
@@ -1425,15 +1552,13 @@ class MainWindow(QMainWindow):
 
         def _check():
             import time as _t
-            if sys.platform != "win32":
-                return
             _t.sleep(delay)
             try:
                 import subprocess
                 out = subprocess.run(
                     ["tasklist", "/FI", "IMAGENAME eq hollow_knight.exe", "/FO", "CSV", "/NH"],
                     capture_output=True, text=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                 )
                 alive = any('hollow_knight.exe' in line.lower() for line in out.stdout.splitlines())
                 if not alive:
@@ -1477,8 +1602,8 @@ class MainWindow(QMainWindow):
         所以点下去的瞬间就要有反馈，同时把按钮锁住。
         """
         self._api_busy = busy
-        for btn in getattr(self, "_api_buttons", {}).values():
-            btn.setEnabled(not busy)
+        # 交给统一入口决定：任务结束后按钮还要看版本校验是否通过
+        self._sync_api_buttons()
         if msg:
             self._log(msg, "info")
 

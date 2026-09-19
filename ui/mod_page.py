@@ -11,6 +11,7 @@ from PySide6.QtCore import (
     QSignalBlocker,
     QFileSystemWatcher,
     QSize,
+    QByteArray,
     QEvent,
     QThread,
     Signal,
@@ -43,9 +44,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (QFont, QCursor, QPixmap, QPainter, QDesktopServices,
                            QTextCursor, QImage)
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
+from ui.md_render import MarkdownBrowser, collect_image_widths, lookup_url
 
 try:  # 精简安装可能不带 QtSvg：图标渲染时优雅降级为文字
     from PySide6.QtSvg import QSvgRenderer
@@ -292,10 +294,6 @@ def get_mod_settings_dir():
     Hollow Knight 的持久化数据目录：Mod 的全局设置（GlobalSettings）都写在这里。
     即 Unity 的 Application.persistentDataPath，与 ModLog.txt 同级。
     """
-    if sys.platform == "darwin":
-        return os.path.expanduser("~/Library/Application Support/Team Cherry/Hollow Knight")
-    if not sys.platform.startswith("win"):
-        return os.path.expanduser("~/.config/unity3d/Team Cherry/Hollow Knight")
     user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
     return os.path.join(user_profile, "AppData", "LocalLow", "Team Cherry", "Hollow Knight")
 
@@ -1114,6 +1112,96 @@ def _collect_remote_images(markdown, base_url):
     return out
 
 
+# 直连失败时的公共图片代理兜底：wsrv.nl 会把任意图片取回并转成 PNG。
+# 用途：README 常把配图挂在 catbox.moe 等境外图床，国内直连会被 RST（连接重置），
+# 而 README 正文能通过 jsDelivr 拿到 —— 正文有、图没有，就是这种情况。代理可达，
+# 于是被墙的图也能显示出来；只有直连确实失败时才走它，不增加正常情况的开销。
+_IMAGE_PROXY = "https://wsrv.nl/?url={}"
+# SVG 走代理时要**主动要求更大的栅格**：README 常把一个自带尺寸只有 32px 的小 SVG
+# 放大显示（HKMP 的 logo 写死 width="52"），而代理默认只按 SVG 自带尺寸出图，
+# 拿到 32px 位图再放大 2~3 倍绘制就糊了。矢量放大无损，所以直接要 512px 的。
+_SVG_PROXY = "https://wsrv.nl/?url={}&w=512&h=512&fit=inside"
+
+# 很多图床/代理（含 wsrv.nl 背后的 Cloudflare）对没有 UA 的请求直接回 403，
+# 带一个浏览器 UA 才正常返回图片。
+_IMAGE_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+}
+
+# SVG 栅格化的上下限：至少 256px（图标会被放大显示），至多 1024px（别太吃内存）
+_SVG_MIN_SIDE = 256
+_SVG_MAX_SIDE = 1024
+
+
+def _is_svg_url(url):
+    return url.split("?", 1)[0].lower().endswith(".svg")
+
+
+def _proxy_url(url):
+    """公共图片代理地址；SVG 额外要求按矢量栅格成更大的位图。"""
+    if _is_svg_url(url):
+        return _SVG_PROXY.format(quote(url, safe=""))
+    return _IMAGE_PROXY.format(quote(url, safe=""))
+
+
+def _looks_like_svg(content):
+    head = content[:512].lstrip().lower()
+    return head.startswith(b"<") and b"<svg" in head
+
+
+def _rasterize_svg(content):
+    """把 SVG 字节按矢量栅格成足够大的位图；失败返回 None（调用方退回 Qt 解码）。"""
+    if QSvgRenderer is None:
+        return None
+    try:
+        renderer = QSvgRenderer(QByteArray(content))
+        if not renderer.isValid():
+            return None
+        size = renderer.defaultSize()
+        if size.isEmpty():
+            size = QSize(_SVG_MIN_SIDE, _SVG_MIN_SIDE)
+        side = max(size.width(), size.height(), 1)
+        target = max(float(_SVG_MIN_SIDE), min(float(_SVG_MAX_SIDE), side * 8.0))
+        scale = target / side
+        img = QImage(max(1, int(round(size.width() * scale))),
+                     max(1, int(round(size.height() * scale))),
+                     QImage.Format_ARGB32)
+        img.fill(0)
+        painter = QPainter(img)
+        renderer.render(painter)
+        painter.end()
+        return img
+    except Exception:
+        return None
+
+
+def _decode_image(content):
+    """图片字节 -> QImage。SVG 按矢量重新栅格（避免被放大显示时发虚），其余交 Qt 解码。"""
+    if _looks_like_svg(content):
+        img = _rasterize_svg(content)
+        if img is not None:
+            return img
+    img = QImage()
+    if img.loadFromData(content) and not img.isNull():
+        return img
+    return None
+
+
+def _download_image(url, timeout=10, ssl_warn_callback=None):
+    """下载并解码单张图片，失败返回 None。"""
+    try:
+        from utils.common import safe_requests_get
+        r = safe_requests_get(url, timeout=timeout, ssl_warn_callback=ssl_warn_callback,
+                              headers=_IMAGE_HEADERS)
+        if r is None or getattr(r, "status_code", 0) != 200:
+            return None
+        return _decode_image(r.content)
+    except Exception:
+        return None
+
+
 def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
     """
     预下载 README 里的**原图**，返回 {url: QImage}（失败的跳过，不影响正文）。
@@ -1130,20 +1218,17 @@ def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
     if not urls:
         return result
     try:
-        from utils.common import safe_requests_get
+        from utils.common import safe_requests_get      # noqa: F401  探测依赖可用
     except Exception:
         return result
     for u in urls:
-        try:
-            r = safe_requests_get(u, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
-            if r is None or getattr(r, "status_code", 0) != 200:
-                continue
-            img = QImage()
-            if not img.loadFromData(r.content) or img.isNull():
-                continue
+        img = _download_image(u, timeout, ssl_warn_callback)
+        if img is None:
+            # 直连失败（多为境外图床被重置）时经公共图片代理重取。
+            # 结果仍以**原图 URL** 为 key，才能和 <img src> 对上。
+            img = _download_image(_proxy_url(u), timeout, ssl_warn_callback)
+        if img is not None:
             result[u] = img
-        except Exception:
-            continue
     return result
 
 
@@ -1175,36 +1260,81 @@ def show_image_preview(parent, image):
     dlg.exec()
 
 
-class _ReadmeBrowser(QTextBrowser):
+class _ReadmeBrowser(MarkdownBrowser):
     """
-    能显示网络图片的 QTextBrowser：
+    能显示网络图片的 Markdown 浏览器：
+      - 排版与样式走 MarkdownBrowser（markdown-it + 暗色样式表）；
       - QTextBrowser 自带的 loadResource 只认 qrc/本地文件，对 http(s) 一律返回空，
         README 里的网络图片会渲染成空白/乱块，所以改用预下载好的缓存；
       - 点击图片会以原尺寸弹出预览（图片被链接包裹时仍走原链接）；
       - 内联显示按需缩窄并缓存，避免每次重绘都重新缩放。
     """
 
+    # README 的图全走本地缓存，缓存里没有的（下载失败/被墙）就没有渲染出来的可能，
+    # 直接删掉，免得 Qt 画一个裂图占位方块。
+    drop_unavailable_images = True
+
+    # 视口左右留点余量，别让图片顶到边框/滚动条上
+    _SIDE_PAD = 24
+    _MIN_WIDTH = 200
+
     def __init__(self, images=None, parent=None):
         super().__init__(parent)
         self._images = images or {}   # 原图（点击预览用）
-        self._scaled = {}             # 内联用的缩略图（懒缓存，按宽度失效）
+        self._scaled = {}             # 内联用的位图（懒缓存，按「显示宽度 + DPR」失效）
+        self._requested = {}          # 作者在 <img width="N"> 里写死的显示宽度
+
+    def available_image_urls(self):
+        # 交给 render_markdown：判断哪些图真能加载出来，加载不出来的直接删掉
+        return set(self._images.keys())
+
+    def set_markdown(self, text):
+        # 尺寸属性在渲染时会被统一剥掉（见 md_render._process_images），
+        # 这里先把作者想要的宽度读回来，出图时按它复现。
+        self._requested = collect_image_widths(text)
+        self._scaled.clear()
+        super().set_markdown(text)
+
+    def _display_width(self, key):
+        """这张图该显示多宽（逻辑像素）：作者写死的宽度优先，但不超出视口。"""
+        limit = max(self._MIN_WIDTH, self.viewport().width() - self._SIDE_PAD)
+        natural = self._images[key].width() or limit
+        want = lookup_url(self._requested, key) or natural
+        return max(1, min(int(want), limit))
 
     def loadResource(self, type_, url):
         if url.isValid():
             key = url.toString()
-            img = self._images.get(key)
-            if img is not None:
-                # 按当前可视宽度限制：README 里常写死 width="800"，
-                # 直接照搬会把图撑到视口外、只剩半张可点。
-                limit = max(200, self.viewport().width() - 24)
-                cached = self._scaled.get(key)
-                if cached is None or cached[0] != limit:
-                    scaled = (img.scaledToWidth(limit, Qt.SmoothTransformation)
-                              if img.width() > limit else img)
-                    cached = (limit, scaled)
-                    self._scaled[key] = cached
-                return cached[1]
+            if key in self._images:
+                return self._image_for(key)
         return super().loadResource(type_, url)
+
+    def _image_for(self, key):
+        """
+        按「显示宽度 × 设备像素比」出图，并把 DPR 标注在图上。
+
+        两处都要照顾，少一个都会糊（在 150% 缩放的屏幕上实测过）：
+          - 像素数：Qt 在缩放屏上按 DPR 放大绘制，只给逻辑像素的位图就会被拉伸发虚；
+            给足「显示宽度 × DPR」个像素，绘制才能 1:1。
+          - devicePixelRatio：Qt 的富文本布局认这个值，按「像素数 ÷ DPR」当逻辑尺寸
+            排版；不标注的话图片会按像素数占位，缩略图会撑成两倍大。
+
+        缓存按 (显示宽度, DPR) 失效，窗口缩放或换屏后会自动重出。
+        """
+        dpr = self.devicePixelRatioF() or 1.0
+        logical = self._display_width(key)
+        cached = self._scaled.get(key)
+        if cached is not None and cached[0] == (logical, dpr):
+            return cached[1]
+        img = self._images[key]
+        px = max(1, int(round(logical * dpr)))
+        if img.width() == px:
+            out = QImage(img)      # 浅拷贝：下面要标注 DPR，不能污染原图（点击预览要用）
+        else:
+            out = img.scaledToWidth(px, Qt.SmoothTransformation)
+        out.setDevicePixelRatio(dpr)
+        self._scaled[key] = ((logical, dpr), out)
+        return out
 
     def _image_at(self, pos):
         """
@@ -1278,6 +1408,25 @@ class _ReadmeWorker(QThread):
         self.done.emit(text, images, base, "")
 
 
+class _TranslateWorker(QThread):
+    """后台翻译 README：长文本要走多次网络请求，不能卡住 UI 主线程。"""
+
+    done = Signal(str, str)  # (译文, 错误信息)
+
+    def __init__(self, markdown, parent=None):
+        super().__init__(parent)
+        self._markdown = markdown or ""
+
+    def run(self):
+        try:
+            from utils.translator import translate_markdown
+            text = translate_markdown(self._markdown)
+        except Exception as e:      # noqa: BLE001 网络类异常统一转成提示
+            self.done.emit("", str(e))
+            return
+        self.done.emit(text or "", "")
+
+
 def show_readme_dialog(parent, title, markdown, images=None, base_url=""):
     """展示 README 弹窗（markdown 渲染；配图走预下载缓存）。内容由调用方提前取好。"""
     dlg = QDialog(parent)
@@ -1290,25 +1439,86 @@ def show_readme_dialog(parent, title, markdown, images=None, base_url=""):
     layout.setSpacing(10)
 
     browser = _ReadmeBrowser(images)
-    browser.setOpenExternalLinks(True)
     browser.setStyleSheet("""
         QTextBrowser {
-            background-color: #1e1e22;
-            color: #d8d8e0;
+            background-color: #1c1c20;
             border: 1px solid #33333c;
             border-radius: 8px;
-            padding: 14px;
-            font-size: 13px;
+            padding: 16px 18px;
         }
     """)
-    browser.setMarkdown(_isolate_image_lines(markdown))
-    if base_url:
-        # 让 README 里的相对图片/链接能解析到仓库目录（需在 setMarkdown 之后设置）
-        browser.document().setBaseUrl(QUrl(base_url))
-    browser.moveCursor(QTextCursor.Start)
+    def _apply(md):
+        browser.set_markdown(_isolate_image_lines(md))
+        if base_url:
+            # 让 README 里的相对图片/链接能解析到仓库目录（需在 setMarkdown 之后设置）
+            browser.document().setBaseUrl(QUrl(base_url))
+        browser.moveCursor(QTextCursor.Start)
+
+    _apply(markdown)
     layout.addWidget(browser, stretch=1)
 
+    # 翻译状态：译文只在首次点击时取一次，之后在原文/译文间来回切换
+    original_md = markdown
+    cache = {"translated": None}
+    showing = {"translated": False}
+
     btn_row = QHBoxLayout()
+
+    trans_btn = QPushButton("🌐 一键翻译")
+    trans_btn.setFixedSize(120, 34)
+    trans_btn.setCursor(QCursor(Qt.PointingHandCursor))
+    trans_btn.setStyleSheet("""
+        QPushButton {
+            background: #2a2a32; color: #7ab8ff;
+            border: 1px solid #3a3a44; border-radius: 8px;
+            font-size: 13px; font-weight: bold;
+        }
+        QPushButton:hover { background: #34343e; }
+        QPushButton:disabled {
+            color: #4f4f5c; border-color: #33333c; background: transparent;
+        }
+    """)
+
+    def _on_translate():
+        if showing["translated"]:
+            # 当前是译文 -> 切回原文
+            showing["translated"] = False
+            _apply(original_md)
+            trans_btn.setText("🌐 一键翻译")
+            return
+        if cache["translated"] is not None:
+            # 已翻过 -> 直接复用，不再发请求
+            showing["translated"] = True
+            _apply(cache["translated"])
+            trans_btn.setText("📄 显示原文")
+            return
+
+        trans_btn.setEnabled(False)
+        trans_btn.setText("🌐 翻译中…")
+        QToolTip.showText(QCursor.pos(), "正在调用微软翻译…", trans_btn)
+
+        def _done(text, err):
+            QToolTip.hideText()
+            trans_btn.setEnabled(True)
+            if text:
+                cache["translated"] = text
+                showing["translated"] = True
+                _apply(text)
+                trans_btn.setText("📄 显示原文")
+            else:
+                trans_btn.setText("🌐 一键翻译")
+                QMessageBox.information(
+                    dlg, "翻译失败",
+                    f"未能完成翻译：{err or '未知错误'}\n请检查网络后重试。")
+
+        worker = _TranslateWorker(original_md, dlg)
+        worker.done.connect(_done)
+        # 持有引用，否则线程还在跑就被 GC 回收，信号永远等不到
+        dlg._translate_worker = worker
+        worker.start()
+
+    trans_btn.clicked.connect(_on_translate)
+    btn_row.addWidget(trans_btn)
     btn_row.addStretch()
     close_btn = QPushButton("关闭")
     close_btn.setFixedSize(100, 34)
@@ -2179,7 +2389,7 @@ class ModPage(QWidget):
         title.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
         title.setStyleSheet("color: #ffffff; background: transparent;")
 
-        self.multi_select_hint = QLabel("按住 Ctrl 或 Shift 可进行多选，双击模组可以快速启用或禁用")
+        self.multi_select_hint = QLabel("按住 Ctrl 或 Shift 可进行多选，右键单击模组可以快速启用或禁用")
         self.multi_select_hint.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
         self.multi_select_hint.setStyleSheet("""
             QLabel {
@@ -2399,7 +2609,6 @@ class ModPage(QWidget):
             }
         """)
         self.mod_list.itemSelectionChanged.connect(self._on_selection_changed)
-        self.mod_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.mod_list.viewport().installEventFilter(self)
         left_layout.addWidget(self.mod_list)
 
@@ -2436,8 +2645,8 @@ class ModPage(QWidget):
             if t == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._on_list_press(event)
                 return True
-            if t == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton:
-                self._on_list_double_click(event)
+            if t == QEvent.MouseButtonPress and event.button() == Qt.RightButton:
+                self._on_list_right_click(event)
                 return True
             if t == QEvent.MouseMove and (event.buttons() & Qt.LeftButton) and self._sel_press_row >= 0:
                 self._on_list_move(event)
@@ -2604,10 +2813,20 @@ class ModPage(QWidget):
                 lo, hi = min(anchor, row), max(anchor, row)
                 new_rows = set(self._range_visible_rows(lo, hi))
             else:
-                new_rows = {row}
+                # 无修饰键单击：
+                # - 点未选中的行 -> 只选中它（标准列表行为，收敛选择）
+                # - 点多选中的某一行 -> 同样收敛为只选中它。绝不能把该行从
+                #   多选集合里摘掉：那是 Ctrl 点击的语义，否则选了 4 个再点
+                #   其中一个会莫名少一个。
+                # - 点「唯一」已选中的行 -> 取消选中（单击开关，省去按 Ctrl）
+                if self._sel_base == {row}:
+                    new_rows = set()
+                else:
+                    new_rows = {row}
             self._apply_selection_rows(sorted(new_rows))
         if not self._sel_shift:
-            self._sel_click_anchor = row
+            # 反选掉的行不能再当 Shift 区间锚点，否则下次 Shift 点击会错的连一片
+            self._sel_click_anchor = row if row in new_rows else -1
         # 只同步 current（便于键盘上下导航），不要动选择集：
         # setCurrentRow() 会清空并只选中该行，会把刚算好的多选/加选结果打回单行
         sm = self.mod_list.selectionModel()
@@ -2665,8 +2884,9 @@ class ModPage(QWidget):
         self._sel_pending_blank = False
         self._on_selection_changed(update_detail=True)
 
-    def _on_list_double_click(self, event):
-        """双击：保持原有“双击启用/禁用”交互"""
+    def _on_list_right_click(self, event):
+        """右键单击：启用/禁用光标所在行的 Mod（原为双击，避免与“单击切换
+        选中”打架）。只作用于右键那一行，不动当前选择集——多选时另有批量按钮。"""
         pos = event.position().toPoint()
         row = self._row_at(pos)
         self._stop_autoscroll()
@@ -2676,7 +2896,7 @@ class ModPage(QWidget):
             return
         item = self.mod_list.item(row)
         if item is not None:
-            self._on_item_double_clicked(item)
+            self._on_item_toggle_enabled(item)
 
     def _ensure_autoscroll(self):
         if self._sel_autoscroll is None:
@@ -2722,7 +2942,7 @@ class ModPage(QWidget):
             self._sel_autoscroll = None
 
     # ---------- 原有业务逻辑 ----------
-    def _on_item_double_clicked(self, item):
+    def _on_item_toggle_enabled(self, item):
         mod_name = item.data(Qt.UserRole)
         if not mod_name or mod_name == "暂无已安装模组":
             return
@@ -2752,15 +2972,30 @@ class ModPage(QWidget):
             pass
 
     def _toggle_select_all(self):
-        if self.select_all_btn.text() == "全选":
-            for i in range(self.mod_list.count()):
-                item = self.mod_list.item(i)
-                if not item.isHidden():
-                    item.setSelected(True)
-            self.select_all_btn.setText("取消")
-        else:
-            self.mod_list.clearSelection()
-            self.select_all_btn.setText("全选")
+        """全选 / 取消全选。
+
+        - 只作用于真实模组行：跳过「暂无已安装模组」占位行，否则占位行也会被打
+          上选中态，但它在统计里不算数，按钮文字会和实际状态对不上。
+        - 状态不靠按钮文字判断（筛选或程序改选后文字会失真），而是实时比对
+          「已选真实行数 vs 可见真实行数」来决定这次是全选还是取消。
+        """
+        valid_rows = []
+        for i in range(self.mod_list.count()):
+            item = self.mod_list.item(i)
+            if item is None or item.isHidden():
+                continue
+            if item.data(Qt.UserRole) in (None, "", "暂无已安装模组"):
+                continue
+            valid_rows.append(i)
+        if not valid_rows:
+            return
+
+        all_selected = all(self.mod_list.item(i).isSelected() for i in valid_rows)
+        # 屏蔽信号，避免逐行 setSelected 触发 N 次 itemSelectionChanged
+        with QSignalBlocker(self.mod_list):
+            for i in valid_rows:
+                self.mod_list.item(i).setSelected(not all_selected)
+        self._on_selection_changed()
 
     def _on_selection_changed(self, update_detail=True):
         """选择变化同步。拖拽过程中以 update_detail=False 高频轻量调用，
@@ -3168,6 +3403,9 @@ class ModPage(QWidget):
     def _clear_selection(self):
         if self.mod_list.selectedItems():
             self.mod_list.clearSelection()
+        # Shift 锚点是行号：筛选/搜索会重排行号，不重置的话下次 Shift 点击
+        # 会拿旧行号当起点，框出一段完全不相干的区间
+        self._sel_click_anchor = -1
         if self._current_widget:
             self._current_widget.set_selected(False)
             self._current_widget = None
@@ -3671,7 +3909,7 @@ class OnlineModPage(QWidget):
                 for i in range(self.mod_list.count()):
                     if self.mod_list.item(i).data(Qt.UserRole) == selected_mod:
                         self.mod_list.setCurrentRow(i)
-                        self._on_item_clicked(self.mod_list.item(i))
+                        self._on_item_clicked(self.mod_list.item(i), allow_toggle=False)
                         break
 
             self._filter_mods()
@@ -3841,21 +4079,26 @@ class OnlineModPage(QWidget):
         self.mod_list.clearSelection()
         item.setSelected(True)
         self.mod_list.setCurrentItem(item)
-        self._on_item_clicked(item)
+        self._on_item_clicked(item, allow_toggle=False)
 
     def _manual_refresh(self):
         if self.parent and hasattr(self.parent, 'game_path'):
             self.refresh_mod_list(self.parent.game_path)
 
-    def _on_item_clicked(self, item):
+    def _on_item_clicked(self, item, allow_toggle=True):
         mod_name = item.data(Qt.UserRole)
         if not mod_name or mod_name == "暂无在线模组":
             return
 
         current_widget = self.mod_list.itemWidget(item)
         # 行 widget 可能是懒构建的（点击的那一瞬间可能尚未建出来），
-        # 因此以“同一行 + 同一 widget”为重复点击判断，避免漏刷详情
+        # 因此以“同一行 + 同一 widget”为重复点击判断。
+        # 用户再次点击已选中的 Mod = 取消选中；但程序内部选中（刷新后恢复、
+        # 按名跳转等）不能触发反选，否则会把自己刚选中的项又清掉，故用
+        # allow_toggle 区分。
         if current_widget is self._current_widget and current_widget is not None and self._current_mod == mod_name:
+            if allow_toggle:
+                self._clear_selection()
             return
 
         if self._current_widget and self._current_widget is not current_widget:
@@ -3876,7 +4119,7 @@ class OnlineModPage(QWidget):
             mn = item.data(Qt.UserRole)
             if mn and normalize_name(mn) == target:
                 self.mod_list.setCurrentRow(i)
-                self._on_item_clicked(item)
+                self._on_item_clicked(item, allow_toggle=False)
                 return True
         return False
 

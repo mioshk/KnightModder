@@ -55,10 +55,49 @@ except ImportError:
     print("请安装 PySide6: pip install PySide6")
     sys.exit(1)
 
-from utils.common import get_asset_path
+from utils.common import get_asset_path, get_base_dir
 
 # ---------- UI 模块 ----------
 from ui import MainWindow
+
+
+def _install_qt_translation(app):
+    """给 Qt 自带控件装上中文：QMessageBox 的「确定 / 是 / 否」、
+    QFileDialog 的「打开 / 取消」、QLineEdit 右键菜单等。
+
+    这些文案默认跟随系统语言，非中文系统上就会显示 OK / Yes / No。翻译文件来自
+    PySide6 自带的 translations 目录（qtbase_zh_CN.qm 才是基础控件那批）。
+
+    打包后目录结构会变，所以几个位置都找一遍；QTranslator 必须一直被引用着，
+    被垃圾回收后翻译会失效，所以挂在 app 上。
+    """
+    import PySide6
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+
+    candidates = [
+        QLibraryInfo.path(QLibraryInfo.TranslationsPath),
+        os.path.join(os.path.dirname(PySide6.__file__), "translations"),
+        os.path.join(get_base_dir(), "PySide6", "translations"),
+        os.path.join(get_base_dir(), "translations"),
+    ]
+    loaded = []
+    # 外层按翻译文件、内层按候选路径：同一个文件装上一次就停，
+    # 否则每条候选路径都命中时会把同一个 .qm 装好几遍。
+    for name in ("qtbase_zh_CN", "qt_zh_CN"):
+        for base in candidates:
+            if not base:
+                continue
+            path = os.path.join(base, name + ".qm")
+            if not os.path.isfile(path):
+                continue
+            trans = QTranslator()
+            if trans.load(path):
+                app.installTranslator(trans)
+                loaded.append(trans)
+                break
+
+    app._qt_translators = loaded   # 保持引用
+    return loaded
 
 
 def _delayed_check_update(window):
@@ -99,6 +138,8 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # 弹窗按钮（确定 / 是 / 否 …）显示中文，而不是跟随系统语言的 OK / Yes / No
+    _install_qt_translation(app)
 
     # 任务栏/标题栏图标（打包后从 _MEIPASS 读取，源码运行从项目目录读取）
     app.setWindowIcon(QIcon(get_asset_path("icon.ico")))

@@ -50,28 +50,14 @@ def set_download_dir(path: str) -> bool:
 
 
 def get_save_folder():
-    """获取游戏存档文件夹路径（按平台分支）"""
-    s = get_system_type()
-    if s == "Windows":
-        return os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\Team Cherry\Hollow Knight")
-    if s == "Darwin":
-        return os.path.expanduser("~/Library/Application Support/unity.Team Cherry.Hollow Knight")
-    if s == "Linux":
-        return os.path.expanduser("~/.config/unity3d/Team Cherry/Hollow Knight")
-    return None
+    """获取游戏存档文件夹路径（Windows）"""
+    return os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\Team Cherry\Hollow Knight")
 
 
 def open_path(path):
-    """跨平台打开文件/文件夹/URL（Windows 用 os.startfile，macOS 用 open，Linux 用 xdg-open）"""
-    import subprocess
-    s = get_system_type()
+    """打开文件/文件夹/URL（Windows 用 os.startfile）"""
     try:
-        if s == "Windows":
-            os.startfile(path)
-        elif s == "Darwin":
-            subprocess.Popen(["open", path])
-        else:
-            subprocess.Popen(["xdg-open", path])
+        os.startfile(path)
         return True
     except Exception:
         return False
@@ -160,16 +146,16 @@ def normalize_path(path):
     """
     统一路径格式：
     - 盘符大写
-    - 使用正斜杠 /
-    - 确保盘符后有斜杠
+    - 使用反斜杠 \（Windows 原生分隔符）
+    - 确保盘符后有反斜杠
     """
     if not path:
         return path
+    path = path.replace('/', '\\')
     if len(path) >= 2 and path[1] == ':':
         path = path[0].upper() + path[1:]
-        if len(path) == 2 or path[2] not in ('/', '\\'):
-            path = path[:2] + '/' + path[2:]
-    path = path.replace('\\', '/')
+        if len(path) == 2 or path[2] != '\\':
+            path = path[:2] + '\\' + path[2:]
     return path
 
 
@@ -186,42 +172,23 @@ def get_asset_path(*names):
 
 def get_managed_dir(game_path):
     """
-    获取游戏 Managed 目录（按平台分支）。
-    - Windows / Linux：<root>/hollow_knight_Data/Managed
-    - macOS：<root>/Hollow Knight.app/Contents/Resources/Data/Managed
+    获取游戏 Managed 目录：<root>/hollow_knight_Data/Managed
     """
-    if get_system_type() == "Darwin":
-        return os.path.join(game_path, "Hollow Knight.app", "Contents", "Resources", "Data", "Managed")
     return os.path.join(game_path, "hollow_knight_Data", "Managed")
 
 
 def get_mods_dir(game_path):
-    """获取 Mods 目录路径（按平台分支）"""
+    """获取 Mods 目录路径"""
     return os.path.join(get_managed_dir(game_path), "Mods")
 
 
 def get_game_exe_path(game_path):
     """
-    获取游戏可执行文件路径。
-    - Windows：<root>/hollow_knight.exe
-    - macOS：<root>/Hollow Knight.app（用 open 启动）
-    - Linux：<root>/hollow_knight.x86_64（或 .x86）
-    找不到返回 None。
+    获取游戏可执行文件路径：<root>/hollow_knight.exe，找不到返回 None。
     """
-    system = get_system_type()
-    if system == "Windows":
-        exe = os.path.join(game_path, "hollow_knight.exe")
-        if os.path.isfile(exe):
-            return exe
-    elif system == "Darwin":
-        app = os.path.join(game_path, "Hollow Knight.app")
-        if os.path.isdir(app):
-            return app
-    elif system == "Linux":
-        for name in ("hollow_knight.x86_64", "hollow_knight.x86"):
-            p = os.path.join(game_path, name)
-            if os.path.isfile(p):
-                return p
+    exe = os.path.join(game_path, "hollow_knight.exe")
+    if os.path.isfile(exe):
+        return exe
     return None
 
 
@@ -230,7 +197,7 @@ def get_game_exe_path(game_path):
 # ============================================================
 def get_steam_app_install_dir(appid=STEAM_APPID):
     """
-    返回 Steam 库中指定 AppID 的官方安装目录（跨所有 Steam 库查找，跨平台）。
+    返回 Steam 库中指定 AppID 的官方安装目录（跨所有 Steam 库查找）。
 
     通过 Steam 根目录定位 libraryfolders.vdf 获取全部库路径，
     再读取 appmanifest_<appid>.acf 中的 installdir 拼出实际安装位置。
@@ -238,38 +205,18 @@ def get_steam_app_install_dir(appid=STEAM_APPID):
     """
     import re
 
-    system = get_system_type()
-
-    # 1. 定位 Steam 根目录（按平台分支）
+    # 1. 定位 Steam 根目录（Windows 注册表优先，失败回退默认安装位置）
     steam_root = None
-    if system == "Windows":
-        try:
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam") as key:
-                steam_root = winreg.QueryValueEx(key, "SteamPath")[0]
-        except Exception:
-            pass
-        if not steam_root or not os.path.isdir(steam_root):
-            pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-            pf = os.environ.get("ProgramFiles", "C:\\Program Files")
-            for cand in [os.path.join(pf86, "Steam"), os.path.join(pf, "Steam")]:
-                if os.path.isdir(cand):
-                    steam_root = cand
-                    break
-    else:
-        home = os.path.expanduser("~")
-        if system == "Darwin":
-            candidates = [
-                os.path.join(home, "Library", "Application Support", "Steam"),
-                os.path.join(home, ".steam", "steam"),
-            ]
-        else:  # Linux
-            candidates = [
-                os.path.join(home, ".steam", "steam"),
-                os.path.join(home, ".local", "share", "Steam"),
-                os.path.join(home, ".steam"),
-            ]
-        for cand in candidates:
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam") as key:
+            steam_root = winreg.QueryValueEx(key, "SteamPath")[0]
+    except Exception:
+        pass
+    if not steam_root or not os.path.isdir(steam_root):
+        pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+        pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+        for cand in [os.path.join(pf86, "Steam"), os.path.join(pf, "Steam")]:
             if os.path.isdir(cand):
                 steam_root = cand
                 break
@@ -336,132 +283,88 @@ def find_hollow_knight_exe():
     自动检测Steam/GOG安装目录中的空洞骑士
     返回列表: [(exe_path, game_root_path), ...]
     """
-    system = get_system_type()
     results = []
 
-    if system == "Windows":
-        # ----- Steam 检测 -----
-        steam_paths = []
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam")
-            steam_path = winreg.QueryValueEx(key, "SteamPath")[0]
-            if steam_path:
-                steam_paths.append(steam_path)
-        except Exception:
-            pass
+    # ----- Steam 检测 -----
+    steam_paths = []
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam")
+        steam_path = winreg.QueryValueEx(key, "SteamPath")[0]
+        if steam_path:
+            steam_paths.append(steam_path)
+    except Exception:
+        pass
 
-        pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-        pf = os.environ.get("ProgramFiles", "C:\\Program Files")
-        steam_paths.extend([
-            os.path.join(pf86, "Steam"),
-            os.path.join(pf, "Steam"),
-        ])
-        for d in ["D:", "E:", "F:", "G:"]:
-            # 跳过不存在的盘符（光驱、未挂载盘会导致 isdir 极慢）
-            if not os.path.exists(d + ":\\"):
-                continue
-            steam_paths.append(os.path.join(d, "SteamLibrary"))
-            steam_paths.append(os.path.join(d, "Steam"))
+    pf86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+    pf = os.environ.get("ProgramFiles", "C:\\Program Files")
+    steam_paths.extend([
+        os.path.join(pf86, "Steam"),
+        os.path.join(pf, "Steam"),
+    ])
+    for d in ["D:", "E:", "F:", "G:"]:
+        # 跳过不存在的盘符（光驱、未挂载盘会导致 isdir 极慢）
+        if not os.path.exists(d + ":\\"):
+            continue
+        steam_paths.append(os.path.join(d, "SteamLibrary"))
+        steam_paths.append(os.path.join(d, "Steam"))
 
-        for sp in steam_paths:
-            if os.path.isdir(sp):
-                base = os.path.join(sp, "steamapps", "common", "Hollow Knight")
-                exe = os.path.join(base, "hollow_knight.exe")
-                if os.path.isfile(exe):
-                    results.append((exe, normalize_path(base)))
+    for sp in steam_paths:
+        if os.path.isdir(sp):
+            base = os.path.join(sp, "steamapps", "common", "Hollow Knight")
+            exe = os.path.join(base, "hollow_knight.exe")
+            if os.path.isfile(exe):
+                results.append((exe, normalize_path(base)))
 
-        # ----- GOG 检测 -----
-        gog_paths = []
-        try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\GOG.com\Games")
-            i = 0
-            while True:
+    # ----- GOG 检测 -----
+    gog_paths = []
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\GOG.com\Games")
+        i = 0
+        while True:
+            try:
+                subkey_name = winreg.EnumKey(key, i)
+                subkey = winreg.OpenKey(key, subkey_name)
                 try:
-                    subkey_name = winreg.EnumKey(key, i)
-                    subkey = winreg.OpenKey(key, subkey_name)
-                    try:
-                        game_name = winreg.QueryValueEx(subkey, "gameName")[0]
-                        if "hollow" in game_name.lower() or "knight" in game_name.lower():
-                            install_path = winreg.QueryValueEx(subkey, "path")[0]
-                            if install_path:
-                                gog_paths.append(normalize_path(install_path))
-                    except Exception:
-                        pass
-                    i += 1
-                except WindowsError:
-                    break
-        except Exception:
-            pass
+                    game_name = winreg.QueryValueEx(subkey, "gameName")[0]
+                    if "hollow" in game_name.lower() or "knight" in game_name.lower():
+                        install_path = winreg.QueryValueEx(subkey, "path")[0]
+                        if install_path:
+                            gog_paths.append(normalize_path(install_path))
+                except Exception:
+                    pass
+                i += 1
+            except WindowsError:
+                break
+    except Exception:
+        pass
 
-        gog_paths.extend([
-            normalize_path(os.path.join(pf86, "GOG Galaxy", "Games", "Hollow Knight")),
-            normalize_path(os.path.join(pf, "GOG Galaxy", "Games", "Hollow Knight")),
-        ])
-        for d in ["D:", "E:", "F:", "G:"]:
-            if not os.path.exists(d + ":\\"):
-                continue
-            gog_paths.append(normalize_path(os.path.join(d, "GOG Games", "Hollow Knight")))
-            gog_paths.append(normalize_path(os.path.join(d, "GOG Galaxy", "Games", "Hollow Knight")))
+    gog_paths.extend([
+        normalize_path(os.path.join(pf86, "GOG Galaxy", "Games", "Hollow Knight")),
+        normalize_path(os.path.join(pf, "GOG Galaxy", "Games", "Hollow Knight")),
+    ])
+    for d in ["D:", "E:", "F:", "G:"]:
+        if not os.path.exists(d + ":\\"):
+            continue
+        gog_paths.append(normalize_path(os.path.join(d, "GOG Games", "Hollow Knight")))
+        gog_paths.append(normalize_path(os.path.join(d, "GOG Galaxy", "Games", "Hollow Knight")))
 
-        for gp in gog_paths:
-            if os.path.isdir(gp):
-                exe = os.path.join(gp, "hollow_knight.exe")
-                if os.path.isfile(exe):
-                    results.append((exe, normalize_path(gp)))
+    for gp in gog_paths:
+        if os.path.isdir(gp):
+            exe = os.path.join(gp, "hollow_knight.exe")
+            if os.path.isfile(exe):
+                results.append((exe, normalize_path(gp)))
 
-        # 去重（Windows 路径大小写不敏感）
-        seen = set()
-        unique_results = []
-        for exe, path in results:
-            key = os.path.normcase(path)
-            if key not in seen:
-                seen.add(key)
-                unique_results.append((exe, path))
-        results = unique_results
-
-    elif system == "Darwin":
-        # macOS：游戏在 .app 包内；游戏根目录为包含 Hollow Knight.app 的文件夹
-        home = os.path.expanduser("~")
-        mac_candidates = [
-            os.path.join(home, "Library", "Application Support", "Steam",
-                         "steamapps", "common", "Hollow Knight"),
-            os.path.join(home, ".steam", "steam", "steamapps", "common", "Hollow Knight"),
-            "/Applications/Hollow Knight.app",
-        ]
-        seen = set()
-        for c in mac_candidates:
-            if c.endswith(".app"):
-                app = c
-                root = os.path.dirname(c)
-            else:
-                root = c
-                app = os.path.join(root, "Hollow Knight.app")
-            if os.path.isdir(app):
-                key = os.path.normcase(normalize_path(root))
-                if key not in seen:
-                    seen.add(key)
-                    results.append((app, normalize_path(root)))
-
-    elif system == "Linux":
-        # Linux：可执行文件为 hollow_knight.x86_64 / .x86
-        home = os.path.expanduser("~")
-        linux_candidates = [
-            os.path.join(home, ".steam", "steam", "steamapps", "common", "Hollow Knight"),
-            os.path.join(home, ".local", "share", "Steam", "steamapps", "common", "Hollow Knight"),
-            os.path.join(home, ".steam", "steamapps", "common", "Hollow Knight"),
-        ]
-        seen = set()
-        for root in linux_candidates:
-            for name in ("hollow_knight.x86_64", "hollow_knight.x86"):
-                exe = os.path.join(root, name)
-                if os.path.isfile(exe):
-                    key = os.path.normcase(normalize_path(root))
-                    if key not in seen:
-                        seen.add(key)
-                        results.append((exe, normalize_path(root)))
-                    break
+    # 去重（Windows 路径大小写不敏感）
+    seen = set()
+    unique_results = []
+    for exe, path in results:
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            unique_results.append((exe, path))
+    results = unique_results
 
     return results
 
@@ -583,10 +486,6 @@ def is_unity_mutex_held(candidates=None):
       （例如被杀软挂起、其他会话残留、其他 Mod 工具持有的同名锁）
     返回被占用 mutex 的名称，无占用返回 None。
     """
-    # Mutex 是 Windows 专属机制，非 Windows 直接返回 None（macOS/Linux 无 kernel32）
-    if sys.platform != "win32":
-        return None
-
     import ctypes
     from ctypes import wintypes
 

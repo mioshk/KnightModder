@@ -312,7 +312,7 @@ def _resolve_api_package(status_callback, progress_callback):
     if not pkg.all_links:
         raise RuntimeError(f"API 清单里没有配置 {system} 的下载链接")
 
-    platform_key = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}[system]
+    platform_key = {"Windows": "windows"}[system]
     errors = []
     for link in pkg.all_links:
         try:
@@ -359,6 +359,16 @@ def _install_api_locked(game_path, status_callback=None, progress_callback=None)
     备份，用户误删一个就得重新下载 API。
     """
     status_callback = status_callback or (lambda *a: None)
+
+    # 版本门禁：只放行 1.5.78。放在最前面——连「已启用」这种幂等分支也要挡住，
+    # 否则非目标版本上照样能触发操作。
+    # 延迟导入：core.game_version 反过来要用本模块的 _api_paths，顶层互相导入会循环。
+    from core.game_version import check_game_version
+
+    _ver = check_game_version(game_path)
+    if not _ver["ok"]:
+        raise RuntimeError(_ver["message"])
+
     managed = get_managed_dir(game_path)
     os.makedirs(managed, exist_ok=True)
     cur, van, mod = _api_paths(managed)

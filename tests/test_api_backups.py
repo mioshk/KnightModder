@@ -5,6 +5,7 @@
 都只剩一份备份，用户误删一个文件就得重新下载 API。现在切换一律走复制，两份必须
 始终都在。
 """
+import contextlib
 import os
 import shutil
 import tempfile
@@ -31,8 +32,20 @@ class ApiBackupPersistenceTests(unittest.TestCase):
         return path
 
     def _ctx(self):
-        return mock.patch.object(self.installer, "get_managed_dir",
-                                 return_value=self.managed)
+        """切到临时 Managed 目录，并放行游戏版本校验。
+
+        本文件的用例只关心 .v / .m 两份备份的行为；版本门禁（原版 dll 哈希）
+        交给 tests/test_game_version.py 单独覆盖，这里直接放行，免得每次都要
+        在临时目录里造一份哈希登记过的 dll。
+        """
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(self.installer, "get_managed_dir",
+                                              return_value=self.managed))
+        stack.enter_context(mock.patch(
+            "core.game_version.check_game_version",
+            return_value={"ok": True, "version": "1.5.78.11833",
+                          "sha256": "fake", "message": "ok"}))
+        return stack
 
     def test_fresh_install_creates_both(self):
         self._put(self.cur, modded=False)

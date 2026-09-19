@@ -8,7 +8,7 @@ import sys
 
 # ---------- 应用基本信息 ----------
 APP_NAME = "KnightModder 骑士模组师"
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 
 # ---------- Steam 相关 ----------
 # 《空洞骑士》Steam AppID 与启动协议
@@ -58,14 +58,10 @@ API_MANIFEST_URL_RAW = f"{GH_RAW_BASE}/{API_MANIFEST_FILE}"
 # 平时改 API 地址请改 api_manifest.json，不要动这里。
 API_ZIP_MAP = {
     "Windows": "moddingapi.v77.windows.zip",
-    "Darwin":  "moddingapi.v77.macos.zip",
-    "Linux":   "moddingapi.v77.linux.zip",
 }
 
 API_QUARK_LINKS = {
     "Windows": "https://pan.quark.cn/s/21185cedf1e2",
-    "Darwin":  "https://pan.quark.cn/s/4630364d1d19",
-    "Linux":   "https://pan.quark.cn/s/51df7de12633",
 }
 
 # ---------- 暗黑极简配色方案 ----------

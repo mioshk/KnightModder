@@ -11,24 +11,6 @@
       "direct_links": [],
       "sha256": "",
       "size": 0
-    },
-    "Darwin": {
-      "file": "moddingapi.v77.macos.zip",
-      "quark_links": [
-        "https://pan.quark.cn/s/4630364d1d19"
-      ],
-      "direct_links": [],
-      "sha256": "",
-      "size": 0
-    },
-    "Linux": {
-      "file": "moddingapi.v77.linux.zip",
-      "quark_links": [
-        "https://pan.quark.cn/s/51df7de12633"
-      ],
-      "direct_links": [],
-      "sha256": "",
-      "size": 0
     }
   }
 }

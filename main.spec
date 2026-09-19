@@ -41,15 +41,10 @@ _THIRD_PARTY_EXCLUDES = [
     'IPython', 'pytest', 'setuptools', 'wheel', 'pip',
 ]
 
-# ---------- 图标：按平台选择（Windows=ico, macOS=icns, Linux 无法内嵌图标） ----------
+# ---------- 图标（Windows 用 ico） ----------
 ICON_PATH = os.path.join(SPECPATH, 'assets', 'icon.ico')
-if sys.platform == 'darwin':
-    ICON_PATH = os.path.join(SPECPATH, 'assets', 'icon.icns')
-elif sys.platform == 'linux':
-    ICON_PATH = os.path.join(SPECPATH, 'assets', 'icon.png')
 
 # ---------- 生成 Windows 版本信息资源文件（写入 exe 右键属性的版本信息） ----------
-# 仅在 Windows 上生效；macOS/Linux 上 PyInstaller 会忽略 version 参数。
 _version_info = f'''# UTF-8
 VSVersionInfo(
     ffi=FixedFileInfo(
@@ -84,13 +79,21 @@ os.makedirs(os.path.dirname(_version_info_path), exist_ok=True)
 with open(_version_info_path, 'w', encoding='utf-8') as _f:
     _f.write(_version_info)
 
+# Qt 自带控件的中文翻译：QMessageBox 的「确定 / 是 / 否」、QFileDialog 的
+# 「打开 / 取消」等。PyInstaller 不一定会自动带上，缺了打包版就又变回英文。
+import PySide6  # noqa: E402
+
+_QT_TRANS_DIR = os.path.join(os.path.dirname(PySide6.__file__), 'translations')
+_QT_TRANS_DATAS = [(os.path.join(_QT_TRANS_DIR, name), 'PySide6/translations')
+                   for name in ('qtbase_zh_CN.qm', 'qt_zh_CN.qm')]
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     # api_manifest.json 是 API 下载地址的离线兜底清单（线上读不到时用它），
     # 必须随程序一起打包，否则打包版在离线时会直接掉到 config 里的内置配置。
-    datas=[('assets', 'assets'), (config.API_MANIFEST_FILE, '.')],
+    datas=[('assets', 'assets'), (config.API_MANIFEST_FILE, '.')] + _QT_TRANS_DATAS,
     # webview：登录窗口改用系统 Edge 内核（WebView2）后新增的依赖。
     # pywebview 的 Windows 后端（edgechromium）是运行时动态导入的，静态分析扫不到，
     # 而它内部还要 import clr（pythonnet）并加载 System.Windows.Forms —— 缺了 clr
@@ -191,64 +194,33 @@ pyz = PYZ(a.pure)
 # PyInstaller 6.22 + 本项目下 tcl 运行时虽打包成功、窗口却始终不显示（静默失败），
 # 投入产出比不划算，故放弃。若要再试，需先单独验证 tcl 能否在本机起窗。
 
-# macOS 上 PyInstaller 单文件(onefile) + PySide6 会在 GUI 初始化阶段 segfault
-# （cocoa 平台插件问题），因此 macOS 改用 onedir（文件夹）模式，Windows/Linux 仍用单文件。
-if sys.platform == 'darwin':
-    exe = EXE(
-        pyz,
-        a.scripts,
-        [],
-        exclude_binaries=True,
-        name=EXE_NAME,
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        upx=True,
-        console=False,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-        icon=([ICON_PATH] if sys.platform != 'linux' else []),
-    )
-    coll = COLLECT(
-        exe,
-        a.binaries,
-        a.datas,
-        strip=False,
-        upx=True,
-        upx_exclude=[],
-        name=EXE_NAME,
-    )
-else:
-    # KM_ONEDIR=1：产出「目录版」（exe + _internal 文件夹），供安装器打包成
-    # 「安装版」。与 onefile 的区别是运行时不必把整个 bundle 解压到 %TEMP%，
-    # 直接从安装目录加载，冷启动能省掉约 2 秒的解压时间。
-    exe = EXE(
-        pyz,
-        a.scripts,
-        ([] if _ONEDIR else a.binaries),
-        ([] if _ONEDIR else a.datas),
-        exclude_binaries=_ONEDIR,
-        name=EXE_NAME,
-        debug=False,
-        bootloader_ignore_signals=False,
-        strip=False,
-        # UPX 显式关闭：onefile 每次启动都要把 bundle 解压到 %TEMP%，对
-        # Qt6WebEngineCore.dll 这种 195 MB 的巨型 DLL 再加一层 UPX 解压只会
-        # 拖慢冷启动；且 UPX 加壳的 exe 常被 Windows Defender 误报为可疑。
-        # （实测开/关的 exe 体积与启动时间完全一致。）
-        upx=False,
-        console=False,
-        disable_windowed_traceback=False,
-        argv_emulation=False,
-        target_arch=None,
-        codesign_identity=None,
-        entitlements_file=None,
-        icon=([ICON_PATH] if sys.platform != 'linux' else []),
-        version=(_version_info_path if sys.platform == 'win32' else None),
-    )
+# KM_ONEDIR=1：产出「目录版」（exe + _internal 文件夹），供安装器打包成
+# 「安装版」。与 onefile 的区别是运行时不必把整个 bundle 解压到 %TEMP%，
+# 直接从安装目录加载，冷启动能省掉约 2 秒的解压时间。
+exe = EXE(
+    pyz,
+    a.scripts,
+    ([] if _ONEDIR else a.binaries),
+    ([] if _ONEDIR else a.datas),
+    exclude_binaries=_ONEDIR,
+    name=EXE_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    # UPX 显式关闭：onefile 每次启动都要把 bundle 解压到 %TEMP%，对
+    # Qt6WebEngineCore.dll 这种 195 MB 的巨型 DLL 再加一层 UPX 解压只会
+    # 拖慢冷启动；且 UPX 加壳的 exe 常被 Windows Defender 误报为可疑。
+    # （实测开/关的 exe 体积与启动时间完全一致。）
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[ICON_PATH],
+    version=_version_info_path,
+)
 
 if _ONEDIR:
     coll = COLLECT(

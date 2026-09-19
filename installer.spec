@@ -64,6 +64,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=(ICON_PATH if sys.platform != 'linux' else []),
-    version=(_VERSION_INFO if sys.platform == 'win32' else None),
+    icon=ICON_PATH,
+    version=_VERSION_INFO,
 )
