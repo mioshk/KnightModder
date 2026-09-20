@@ -467,7 +467,9 @@ class MainWindow(QMainWindow):
 
         if result["ok"]:
             self._version_ok = True
-            self._set_version_bar("ok", result["message"], "可以安装 API 与启动游戏")
+            self._set_version_bar(
+                "ok", result["message"],
+                result.get("detail") or "可以安装 API 与启动游戏")
         else:
             self._version_ok = False
             # 胶囊写完整结论；"怎么退回 1.5.78"的操作指引放 tooltip

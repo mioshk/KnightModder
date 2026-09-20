@@ -1,5 +1,5 @@
 {
-  "version": "1.4.6",
+  "version": "1.4.7",
   "release_date": "2026-09-20",
   "changelog": "- 增加了游戏版本校验，非1.5.78版游戏无法进行API安装和游戏的启动\n- 为模组的readme文档增添了微软一键翻译功能\n- 优化了readme文档、关于、教程页面的显示效果",
   "quark_link": "https://pan.quark.cn/s/033d87a393ee"

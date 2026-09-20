@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from core import installer
+
 
 SAMPLE = {
     "version": 78,
@@ -154,6 +156,13 @@ class ApiManifestTests(unittest.TestCase):
 
 class ResolveApiPackageTests(unittest.TestCase):
     """_resolve_api_package 的链接分派与失败重试"""
+
+    def setUp(self):
+        # 屏蔽内置离线包的短路径，强制走清单/下载逻辑（这些用例只关心下载分支）
+        self._builtin = mock.patch.object(
+            installer, "get_builtin_path", return_value="")
+        self._builtin.start()
+        self.addCleanup(self._builtin.stop)
 
     @staticmethod
     def _pkg(file_name="api.zip", direct=None, quark=None):

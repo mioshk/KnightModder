@@ -170,6 +170,29 @@ def get_asset_path(*names):
     return os.path.join(base, "assets", *names)
 
 
+def get_builtin_path(filename):
+    """定位随软件打包的内置资源（如内置的 1.5.78 原版 dll、Modding API 安装包）。
+
+    这些文件放在 assets/builtin/ 下，打进 exe 后供离线安装/还原使用，无需联网
+    或夸克网盘下载。PyInstaller 6 的 onedir 把 datas 放进 _internal/（安装版）、
+    onefile 放进 _MEIPASS（绿色版），源码运行则在项目根目录——三处都要试，只认
+    一处会找不到。
+    """
+    rel = os.path.join("assets", "builtin", filename)
+    candidates = [
+        os.path.join(get_base_dir(), rel),                  # 源码 / 根目录
+        os.path.join(get_base_dir(), "_internal", rel),     # onedir（安装版）
+    ]
+    try:
+        candidates.append(get_asset_path("builtin", filename))  # onefile（绿色版）
+    except Exception:  # noqa: BLE001
+        pass
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return ""
+
+
 def get_managed_dir(game_path):
     """
     获取游戏 Managed 目录：<root>/hollow_knight_Data/Managed

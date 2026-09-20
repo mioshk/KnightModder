@@ -8,7 +8,7 @@ import sys
 
 # ---------- 应用基本信息 ----------
 APP_NAME = "KnightModder 骑士模组师"
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.7"
 
 # ---------- Steam 相关 ----------
 # 《空洞骑士》Steam AppID 与启动协议

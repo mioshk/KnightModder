@@ -17,10 +17,16 @@ from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
 from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir
-from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path
+from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path, get_builtin_path
 from core.quark import QuarkClient, QuarkError
 # API 的下载地址不再写死在 config 里，统一从 api_manifest.json（线上清单）读取
 from core.api_manifest import get_package
+
+# 随软件内置的离线资源（打进 exe，无需联网/夸克下载）：
+#   - 1.5.78 原版 Assembly-CSharp.dll：缺 .v 备份时用于离线还原
+#   - Modding API 安装包（v77 Windows 版）：用于离线安装/启用
+BUILTIN_API_ZIP = "moddingapi.v77.windows.zip"
+BUILTIN_VANILLA_DLL = "Assembly-CSharp.1.5.78.vanilla.dll"
 
 
 # ==================== 文件工具函数 ====================
@@ -290,11 +296,21 @@ def _download_from_quark(link, dl_dir, pkg, platform_key, status_callback,
 
 def _resolve_api_package(status_callback, progress_callback):
     """
-    取得 API 安装包：downloads/ 里已有则优先用本地缓存；否则按 api_manifest.json
-    （GitHub 上的清单，读不到时逐级兜底到程序自带文件 / 内置配置）里的链接逐个
-    尝试，下载后落盘到 downloads/ 供下次离线复用。
+    取得 API 安装包，优先级：
+      ① 软件内置的离线包（assets/builtin/，已打进 exe）——无需联网、不走夸克网盘；
+      ② downloads/ 本地缓存；
+      ③ 否则按 api_manifest.json（GitHub 清单，兜底到程序自带 / 内置配置）里的
+         链接逐个尝试下载（夸克 / 直链），落盘到 downloads/ 供下次复用。
+
+    正常情况下走 ①，用户完全不需要配置夸克账号、也不需要下载。
     :return: 本地 zip 路径
     """
+    # ① 内置离线包优先：软件自带，不联网、不碰夸克网盘
+    builtin_pkg = get_builtin_path(BUILTIN_API_ZIP)
+    if builtin_pkg and os.path.isfile(builtin_pkg) and zipfile.is_zipfile(builtin_pkg):
+        status_callback(f"使用内置的 Modding API 安装包（离线）", "info")
+        return builtin_pkg
+
     system = get_system_type()
     pkg = get_package(system, status_callback=status_callback)
     if pkg is None:
@@ -304,7 +320,7 @@ def _resolve_api_package(status_callback, progress_callback):
     os.makedirs(dl_dir, exist_ok=True)
     local_path = os.path.join(dl_dir, pkg.file_name)
 
-    # 本地缓存优先：命中则直接复用，无需联网
+    # ② 本地缓存优先：命中则直接复用，无需联网
     if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
         status_callback(f"使用本地缓存的 API 安装包：{pkg.file_name}", "info")
         return local_path
@@ -327,6 +343,29 @@ def _resolve_api_package(status_callback, progress_callback):
             status_callback(f"⚠️ 该链接不可用，尝试下一个：{e}", "warn")
 
     raise RuntimeError("API 所有下载链接均不可用：" + "；".join(errors))
+
+
+def _ensure_vanilla_backup(game_path, status_callback):
+    """确保 .v 原版备份存在；缺失且游戏是 1.5.78 时，用内置原版 dll 离线补齐。
+
+    返回 True 表示 .v 已就位；False 表示无法补齐（非 1.5.78 / 无内置原版）。
+    内置原版只针对 1.5.78，所以非目标版本不会误用。即便补不上，调用方仍可继续
+    （只是该用户暂时无法离线还原，提示走 Steam 验证即可）。
+    """
+    managed = get_managed_dir(game_path)
+    cur, van, mod = _api_paths(managed)
+    if os.path.isfile(van) and not _is_modded_dll(van):
+        return True
+    # 延迟导入：core.game_version 反过来要用本模块的 _api_paths，顶层互相导入会循环。
+    from core.game_version import check_game_version
+    if not check_game_version(game_path)["ok"]:
+        return False
+    builtin_vanilla = get_builtin_path(BUILTIN_VANILLA_DLL)
+    if not (builtin_vanilla and os.path.isfile(builtin_vanilla)):
+        return False
+    shutil.copy2(builtin_vanilla, van)
+    status_callback("⚠️ 缺少原版备份 .v，已用内置的 1.5.78 原版 dll 离线补齐", "warn")
+    return True
 
 
 # API 安装与还原共用一把锁：两者操作的是同一批 dll（.v/.m/Current 三份互换），
@@ -375,10 +414,10 @@ def _install_api_locked(game_path, status_callback=None, progress_callback=None)
     state = get_api_state(game_path)
 
     if state["enabled"]:
-        # 已启用：确保两份备份都在
+        # 已启用：确保两份备份都在（缺 .v 时用内置原版离线补齐）
         if os.path.isfile(cur) and not os.path.isfile(mod):
             shutil.copy2(cur, mod)
-        if not os.path.isfile(van):
+        if not _ensure_vanilla_backup(game_path, status_callback):
             status_callback(
                 "⚠️ 缺少原版备份 .v，将无法离线还原；可用 Steam「验证游戏完整性」"
                 "恢复官方文件后重新安装 API", "warn")
@@ -427,7 +466,8 @@ def _restore_vanilla_locked(game_path, status_callback=None):
     """
     还原原版（对齐 Lumafly 的「关掉 API」= 把原版 dll 切回 Current）：
       - 若 .v 原版备份存在：Current(模组) 另存为 .m，.v 装回 Current，游戏加载原版。
-      - 若 .v 缺失：无法离线还原，返回 {"ok": False, "reason": "no_vanilla_backup"}，
+      - 若 .v 缺失：版本校验通过时用软件内置的 1.5.78 原版 dll 离线补齐 .v 再还原；
+        非 1.5.78 或无内置原版时，返回 {"ok": False, "reason": "no_vanilla_backup"}，
         由调用方提示用户用 Steam「验证游戏完整性」恢复官方原版。
 
     ⚠️ 两份备份 .v / .m 常驻：这里用复制而不是移动，还原完 .v 仍然留在原地，
@@ -445,7 +485,10 @@ def _restore_vanilla_locked(game_path, status_callback=None):
 
     # 当前是模组版，需切回原版
     if not state["has_vanilla_backup"]:
-        return {"ok": False, "reason": "no_vanilla_backup"}
+        # 离线兜底：版本校验通过时用内置的 1.5.78 原版 dll 当 .v 备份，即便用户
+        # 没 .v 也能离线还原（内置原版只针对 1.5.78，非目标版本不启用此兜底）
+        if not _ensure_vanilla_backup(game_path, status_callback):
+            return {"ok": False, "reason": "no_vanilla_backup"}
 
     # 先把当前模组版另存为 .m，再把 .v（原版）装回 Current。
     # 都用复制：两份备份常驻，来回切换多少次都不会少一份。
