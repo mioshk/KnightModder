@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""API 两份备份（.v 原版 / .m 模组版）必须常驻。
+"""安装 / 还原 API 的新模型：不再在 Managed 里写 .v/.m 备份。
 
-早先实现是"互换"（shutil.move）：启用后 .m 被移走、还原后 .v 被移走，任何时刻
-都只剩一份备份，用户误删一个文件就得重新下载 API。现在切换一律走复制，两份必须
-始终都在。
+安装 = 把内置 Modding API 包解压进 Managed；还原 = 把内置 1.5.78 原版 dll 复制回
+Assembly-CSharp.dll。两者都只依赖随软件分发的内置资源，切换靠「重新解压 / 复制原版」，
+不需要任何本地备份文件，来回切换多少次都不会消耗或误删备份。
 """
 import contextlib
 import os
@@ -13,11 +13,11 @@ import unittest
 import zipfile
 from unittest import mock
 
+from core import installer
 
-class ApiBackupPersistenceTests(unittest.TestCase):
+
+class ApiNoBackupTests(unittest.TestCase):
     def setUp(self):
-        from core import installer
-        self.installer = installer
         self.tmp = tempfile.mkdtemp()
         self.managed = os.path.join(self.tmp, "Managed")
         os.makedirs(self.managed)
@@ -32,14 +32,8 @@ class ApiBackupPersistenceTests(unittest.TestCase):
         return path
 
     def _ctx(self):
-        """切到临时 Managed 目录，并放行游戏版本校验。
-
-        本文件的用例只关心 .v / .m 两份备份的行为；版本门禁（原版 dll 哈希）
-        交给 tests/test_game_version.py 单独覆盖，这里直接放行，免得每次都要
-        在临时目录里造一份哈希登记过的 dll。
-        """
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch.object(self.installer, "get_managed_dir",
+        stack.enter_context(mock.patch.object(installer, "get_managed_dir",
                                               return_value=self.managed))
         stack.enter_context(mock.patch(
             "core.game_version.check_game_version",
@@ -47,51 +41,50 @@ class ApiBackupPersistenceTests(unittest.TestCase):
                           "sha256": "fake", "message": "ok"}))
         return stack
 
-    def test_fresh_install_creates_both(self):
+    def _fake_api_zip(self):
+        path = os.path.join(self.tmp, "api.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("Assembly-CSharp.dll", b"ModHooks-injected")
+            zf.writestr("MMHOOK_Assembly-CSharp.dll", b"hook")
+        return path
+
+    def test_install_creates_no_backup_files(self):
         self._put(self.cur, modded=False)
-        zip_path = os.path.join(self.tmp, "api.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr(os.path.basename(self.cur), b"ModHooks-injected")
-        with self._ctx(), mock.patch.object(self.installer, "_resolve_api_package",
+        zip_path = self._fake_api_zip()
+        with self._ctx(), mock.patch.object(installer, "_resolve_api_package",
                                             return_value=zip_path):
-            self.installer.install_api(self.tmp)
-        self.assertTrue(os.path.isfile(self.van), "全新安装后 .v 必须存在")
-        self.assertTrue(os.path.isfile(self.mod), "全新安装后 .m 必须存在")
-        self.assertTrue(self.installer._is_modded_dll(self.cur))
+            installer.install_api(self.tmp)
+        self.assertTrue(installer._is_modded_dll(self.cur), "安装后应是模组版")
+        self.assertFalse(os.path.isfile(self.van), "不应写 .v 备份")
+        self.assertFalse(os.path.isfile(self.mod), "不应写 .m 备份")
 
-    def test_enable_keeps_mod_backup(self):
-        """已装被关 → 启用：.m 不能被 move 掉"""
-        self._put(self.cur, modded=False)
-        self._put(self.mod, modded=True)
-        with self._ctx():
-            state = self.installer.install_api(self.tmp)
-        self.assertTrue(state["enabled"])
-        self.assertTrue(os.path.isfile(self.van), "启用后 .v 必须存在")
-        self.assertTrue(os.path.isfile(self.mod), "启用后 .m 必须保留")
-
-    def test_restore_keeps_vanilla_backup(self):
-        """启用 → 还原：.v 不能被 move 掉"""
+    def test_restore_uses_builtin_vanilla_and_no_backup(self):
         self._put(self.cur, modded=True)
-        self._put(self.van, modded=False)
+        # 还原直接用随软件分发的内置原版 dll（仓库里确有此文件）
         with self._ctx():
-            result = self.installer.restore_vanilla(self.tmp)
+            result = installer.restore_vanilla(self.tmp)
         self.assertTrue(result["ok"])
-        self.assertTrue(os.path.isfile(self.van), "还原后 .v 必须保留")
-        self.assertTrue(os.path.isfile(self.mod), "还原后 .m 必须存在")
-        self.assertFalse(self.installer._is_modded_dll(self.cur))
+        self.assertFalse(installer._is_modded_dll(self.cur), "还原后应是原版")
+        self.assertFalse(os.path.isfile(self.van), "不应写 .v 备份")
+        self.assertFalse(os.path.isfile(self.mod), "不应写 .m 备份")
 
-    def test_toggling_repeatedly_keeps_both(self):
-        """来回切换多轮，两份备份始终都在"""
-        self._put(self.cur, modded=False)
-        self._put(self.mod, modded=True)
-        with self._ctx():
+    def test_toggling_repeatedly_without_backup(self):
+        zip_path = self._fake_api_zip()
+        with self._ctx(), \
+             mock.patch.object(installer, "_resolve_api_package", return_value=zip_path):
             for _ in range(3):
-                self.installer.install_api(self.tmp)
-                self.assertTrue(os.path.isfile(self.van), "启用后 .v 丢了")
-                self.assertTrue(os.path.isfile(self.mod), "启用后 .m 丢了")
-                self.installer.restore_vanilla(self.tmp)
-                self.assertTrue(os.path.isfile(self.van), "还原后 .v 丢了")
-                self.assertTrue(os.path.isfile(self.mod), "还原后 .m 丢了")
+                installer.install_api(self.tmp)
+                self.assertTrue(installer._is_modded_dll(self.cur), "安装后应是模组版")
+                r = installer.restore_vanilla(self.tmp)
+                self.assertTrue(r["ok"], "还原应成功（无备份也不影响）")
+                self.assertFalse(installer._is_modded_dll(self.cur), "还原后应是原版")
+
+    def test_restore_already_vanilla_is_noop(self):
+        self._put(self.cur, modded=False)
+        with self._ctx():
+            result = installer.restore_vanilla(self.tmp)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["already_vanilla"])
 
 
 if __name__ == "__main__":

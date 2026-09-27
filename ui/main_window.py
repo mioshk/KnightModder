@@ -441,8 +441,9 @@ class MainWindow(QMainWindow):
     def _refresh_version_status(self):
         """校验游戏版本：刷新状态栏，并按结果启用/禁用相关按钮。
 
-        判定依据是原版 Assembly-CSharp.dll 的哈希（见 core/game_version.py），
-        只看游戏文件本身，所以 Steam / GOG / 手动解压版一视同仁。
+        判定依据是 hollow_knight_Data/globalgamemanagers 的哈希（见
+        core/game_version.py），只看游戏文件本身，所以 Steam / GOG / 手动解压版
+        一视同仁；装了 Mod/API 也不影响判定（Mod 不改版本）。
         """
         if not hasattr(self, "version_bar"):
             return
@@ -1663,7 +1664,7 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._api_restore_task, args=(game_path,), daemon=True).start()
 
     def _api_restore_task(self, game_path):
-        """后台还原原版（对齐 Lumafly：缺原版备份时提示用 Steam 验证游戏完整性）"""
+        """后台还原原版（内置 1.5.78 原版 dll 覆盖，不再依赖本地 .v 备份）"""
         try:
             result = restore_vanilla(game_path, status_callback=self._log)
             if result.get("ok"):
@@ -1672,12 +1673,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.api_finished.emit(True, "已还原为原版游戏（Modding API 已关闭）")
                 return
-            if result.get("reason") == "no_vanilla_backup":
+            if result.get("reason") in ("no_builtin_vanilla", "bad_builtin_vanilla"):
                 self.api_finished.emit(
                     False,
-                    "未找到原版 dll 备份（Assembly-CSharp.dll.v）。\n\n"
-                    "请通过 Steam 右键《空洞骑士》→「属性」→「已安装文件」→"
-                    "「验证游戏文件的完整性」，Steam 会自动恢复官方原版文件。")
+                    "内置的 1.5.78 原版 dll 缺失或校验失败，无法离线还原。\n\n"
+                    "请重新安装 KnightModder 后再试。")
                 return
             self.api_finished.emit(False, "还原失败：未知原因")
         except Exception as e:
@@ -1741,7 +1741,6 @@ class MainWindow(QMainWindow):
             if not self.isVisible():
                 return
             if success:
-                QMessageBox.information(self, "完成", "Mod 安装完成")
                 self.page_local.refresh_mod_list(self.game_path)
             else:
                 QMessageBox.warning(self, "失败", "Mod 安装失败，请查看日志")

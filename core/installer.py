@@ -23,8 +23,9 @@ from core.quark import QuarkClient, QuarkError
 from core.api_manifest import get_package
 
 # 随软件内置的离线资源（打进 exe，无需联网/夸克下载）：
-#   - 1.5.78 原版 Assembly-CSharp.dll：缺 .v 备份时用于离线还原
-#   - Modding API 安装包（v77 Windows 版）：用于离线安装/启用
+#   - 1.5.78 原版 Assembly-CSharp.dll：还原 API 时直接覆盖回游戏目录
+#   - Modding API 安装包（v77 Windows 版）：安装/启用 API 时直接解压进 Managed
+# 说明：不再在用户的 Managed 文件夹写任何 .v/.m 备份，安装/还原都只依赖这两份内置资源。
 BUILTIN_API_ZIP = "moddingapi.v77.windows.zip"
 BUILTIN_VANILLA_DLL = "Assembly-CSharp.1.5.78.vanilla.dll"
 
@@ -176,17 +177,13 @@ def get_api_state(game_path):
     """
     返回当前 API 状态字典：
       enabled            : 当前加载的是否为模组版（True=模组版, False=原版）
-      has_api            : 是否曾安装过 API（.m 备份存在）
-      has_vanilla_backup : 是否有原版备份（.v 存在且确为原版）
+      has_api            : 是否处于「已装/已启用」状态（dll 为模组版）
+      has_vanilla_backup : 内置原版 dll 始终随软件分发，恒为 True（不再在 Managed 写备份）
     """
     managed = get_managed_dir(game_path)
     cur, van, mod = _api_paths(managed)
-    current_modded = _is_modded_dll(cur)
-    has_vanilla_backup = os.path.isfile(van) and not _is_modded_dll(van)
-    if current_modded:
-        return {"enabled": True, "has_api": True, "has_vanilla_backup": has_vanilla_backup}
-    return {"enabled": False, "has_api": os.path.isfile(mod),
-            "has_vanilla_backup": has_vanilla_backup}
+    enabled = _is_modded_dll(cur)
+    return {"enabled": enabled, "has_api": enabled, "has_vanilla_backup": True}
 
 
 def _verify_sha256(path, pkg):
@@ -345,31 +342,9 @@ def _resolve_api_package(status_callback, progress_callback):
     raise RuntimeError("API 所有下载链接均不可用：" + "；".join(errors))
 
 
-def _ensure_vanilla_backup(game_path, status_callback):
-    """确保 .v 原版备份存在；缺失且游戏是 1.5.78 时，用内置原版 dll 离线补齐。
-
-    返回 True 表示 .v 已就位；False 表示无法补齐（非 1.5.78 / 无内置原版）。
-    内置原版只针对 1.5.78，所以非目标版本不会误用。即便补不上，调用方仍可继续
-    （只是该用户暂时无法离线还原，提示走 Steam 验证即可）。
-    """
-    managed = get_managed_dir(game_path)
-    cur, van, mod = _api_paths(managed)
-    if os.path.isfile(van) and not _is_modded_dll(van):
-        return True
-    # 延迟导入：core.game_version 反过来要用本模块的 _api_paths，顶层互相导入会循环。
-    from core.game_version import check_game_version
-    if not check_game_version(game_path)["ok"]:
-        return False
-    builtin_vanilla = get_builtin_path(BUILTIN_VANILLA_DLL)
-    if not (builtin_vanilla and os.path.isfile(builtin_vanilla)):
-        return False
-    shutil.copy2(builtin_vanilla, van)
-    status_callback("⚠️ 缺少原版备份 .v，已用内置的 1.5.78 原版 dll 离线补齐", "warn")
-    return True
-
-
-# API 安装与还原共用一把锁：两者操作的是同一批 dll（.v/.m/Current 三份互换），
-# 并发执行会把备份改乱；下载时还会抢同一个 .part 临时文件（实测报
+# API 安装与还原共用一把锁：两者操作的是同一份 Assembly-CSharp.dll（安装把内置
+# Modding API 包解压进去、还原把内置 1.5.78 原版 dll 复制回去），并发执行会互相
+# 覆盖、把游戏目录改乱；下载时还会抢同一个 .part 临时文件（实测报
 # [WinError 5] 拒绝访问）。UI 层已经禁了按钮，这里再兜一层，命令行等其它入口
 # 重复调用也安全。
 _API_LOCK = threading.Lock()
@@ -387,21 +362,20 @@ def install_api(game_path, status_callback=None, progress_callback=None):
 
 def _install_api_locked(game_path, status_callback=None, progress_callback=None):
     """
-    安装 / 启用 Modding API（对齐 Lumafly 的「安装即备份、开关靠互换」机制）：
-      - 全新安装：备份当前原版 dll -> .v；下载/解压 API 包覆盖 Managed；再备份
-        模组版 dll -> .m。
-      - 已装但被关：把 .m（模组版）装回 Current，无需重新下载。
-      - 已启用：幂等，无操作（确保 .m 备份存在）。
+    安装 / 启用 Modding API（直接用软件内置的 Modding API 包覆盖 Managed）：
 
-    ⚠️ 两份备份 .v / .m 必须**常驻**：切换一律用复制，不用移动。早先是"互换"
-    （shutil.move），结果启用后 .m 没了、还原后 .v 没了，任何时刻都只剩一份
-    备份，用户误删一个就得重新下载 API。
+      - 已启用：幂等，直接返回「已启用」（不再重复解压）。
+      - 全新安装 / 已关再启用：把内置 moddingapi 包解压进 Managed（覆盖当前
+        Assembly-CSharp.dll 与 MMHOOK_*/MonoMod.* 等 API 文件）。
+
+    不再在 Managed 里写 .v/.m 备份：安装即「重新解压内置 API 包」，来回切换多少次
+    都不消耗任何本地备份，误删也无所谓——内置资源随软件分发、离线可用。
     """
     status_callback = status_callback or (lambda *a: None)
 
     # 版本门禁：只放行 1.5.78。放在最前面——连「已启用」这种幂等分支也要挡住，
     # 否则非目标版本上照样能触发操作。
-    # 延迟导入：core.game_version 反过来要用本模块的 _api_paths，顶层互相导入会循环。
+    # 延迟导入：core.game_version 只依赖 utils.common，本模块导入它不会循环。
     from core.game_version import check_game_version
 
     _ver = check_game_version(game_path)
@@ -413,40 +387,16 @@ def _install_api_locked(game_path, status_callback=None, progress_callback=None)
     cur, van, mod = _api_paths(managed)
     state = get_api_state(game_path)
 
+    # 已启用：幂等（不重复解压，避免每次点击都重写一遍 Managed）
     if state["enabled"]:
-        # 已启用：确保两份备份都在（缺 .v 时用内置原版离线补齐）
-        if os.path.isfile(cur) and not os.path.isfile(mod):
-            shutil.copy2(cur, mod)
-        if not _ensure_vanilla_backup(game_path, status_callback):
-            status_callback(
-                "⚠️ 缺少原版备份 .v，将无法离线还原；可用 Steam「验证游戏完整性」"
-                "恢复官方文件后重新安装 API", "warn")
         status_callback("Modding API 已处于启用状态", "info")
         return state
 
-    if state["has_api"] and not state["enabled"]:
-        # 已装但被关：当前是原版 -> 补一份 .v，再把 .m（模组版）装回 Current
-        if os.path.isfile(cur) and (not os.path.isfile(van) or _is_modded_dll(van)):
-            shutil.copy2(cur, van)
-        # 复制而不是移动：.m 必须留在原地，否则下次"关闭再启用"就没得用了
-        shutil.copy2(mod, cur)
-        status_callback("已重新启用 Modding API（模组版）", "success")
-        return get_api_state(game_path)
-
-    # —— 全新安装 ——
-    # 1) 备份用户自己的原版 dll（当前确为原版，且尚无备份或那份备份不是原版）
-    if os.path.isfile(cur) and not _is_modded_dll(cur) and (
-            not os.path.isfile(van) or _is_modded_dll(van)):
-        shutil.copy2(cur, van)
-
-    # 2) 取得安装包（本地缓存优先，否则夸克下载）并解压覆盖 Managed
+    # 取得内置 API 安装包并解压覆盖 Managed（含 Assembly-CSharp.dll 与 MMHOOK/MonoMod 等）
+    # _resolve_api_package 优先用软件内置离线包，不联网、不碰夸克。
     zip_path = _resolve_api_package(status_callback, progress_callback)
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(managed)
-
-    # 3) 备份新装的模组版 dll
-    if os.path.isfile(cur):
-        shutil.copy2(cur, mod)
 
     status_callback("✅ Modding API 安装完成！", "success")
     return get_api_state(game_path)
@@ -464,14 +414,15 @@ def restore_vanilla(game_path, status_callback=None):
 
 def _restore_vanilla_locked(game_path, status_callback=None):
     """
-    还原原版（对齐 Lumafly 的「关掉 API」= 把原版 dll 切回 Current）：
-      - 若 .v 原版备份存在：Current(模组) 另存为 .m，.v 装回 Current，游戏加载原版。
-      - 若 .v 缺失：版本校验通过时用软件内置的 1.5.78 原版 dll 离线补齐 .v 再还原；
-        非 1.5.78 或无内置原版时，返回 {"ok": False, "reason": "no_vanilla_backup"}，
-        由调用方提示用户用 Steam「验证游戏完整性」恢复官方原版。
+    还原原版（把内置 1.5.78 原版 dll 复制回 Assembly-CSharp.dll）：
 
-    ⚠️ 两份备份 .v / .m 常驻：这里用复制而不是移动，还原完 .v 仍然留在原地，
-    否则一关一开就会把原版备份消耗掉。
+    不依赖 Managed 里的任何备份：直接用随软件内置的 1.5.78 原版 dll 覆盖当前
+    Assembly-CSharp.dll。复制前先核对它的哈希确为 1.5.78 原版（错包/损坏直接拒绝），
+    避免把坏文件写进游戏目录。多余的 Modding API 文件（MMHOOK_*/MonoMod.* 等）本就
+    随 API 包解压进来、游戏加载原版 dll 后不会被调用，保留不动。
+
+    还原 API **不拦版本门禁**（对齐历史行为）：即便游戏被 Steam 升级到别的版本，也照常
+    把内置 1.5.78 原版 dll 写回，让用户能先回到一个可识别的状态。
     """
     status_callback = status_callback or (lambda *a: None)
     managed = get_managed_dir(game_path)
@@ -483,18 +434,15 @@ def _restore_vanilla_locked(game_path, status_callback=None):
         status_callback("当前已是原版游戏，无需还原", "info")
         return {"ok": True, "already_vanilla": True}
 
-    # 当前是模组版，需切回原版
-    if not state["has_vanilla_backup"]:
-        # 离线兜底：版本校验通过时用内置的 1.5.78 原版 dll 当 .v 备份，即便用户
-        # 没 .v 也能离线还原（内置原版只针对 1.5.78，非目标版本不启用此兜底）
-        if not _ensure_vanilla_backup(game_path, status_callback):
-            return {"ok": False, "reason": "no_vanilla_backup"}
+    from core.game_version import KNOWN_VANILLA_DLL
+    builtin_vanilla = get_builtin_path(BUILTIN_VANILLA_DLL)
+    if not (builtin_vanilla and os.path.isfile(builtin_vanilla)):
+        return {"ok": False, "reason": "no_builtin_vanilla"}
+    # 安全校验：内置原版必须是货真价实的 1.5.78，否则拒绝（避免错包写坏游戏）
+    if calculate_file_sha256(builtin_vanilla).lower() not in KNOWN_VANILLA_DLL:
+        return {"ok": False, "reason": "bad_builtin_vanilla"}
 
-    # 先把当前模组版另存为 .m，再把 .v（原版）装回 Current。
-    # 都用复制：两份备份常驻，来回切换多少次都不会少一份。
-    if os.path.isfile(cur) and (not os.path.isfile(mod) or not _is_modded_dll(mod)):
-        shutil.copy2(cur, mod)
-    shutil.copy2(van, cur)
+    shutil.copy2(builtin_vanilla, cur)
     status_callback("✅ 已还原为原版游戏（Modding API 已关闭）", "success")
     return {"ok": True, "already_vanilla": False}
 

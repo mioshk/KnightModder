@@ -3106,6 +3106,13 @@ class ModPage(QWidget):
             return
 
         mod_names = [name for name, _ in selected]
+        ret = QMessageBox.question(
+            self, "删除本地 Mod",
+            f"确定要删除以下 {len(mod_names)} 个已安装的 Mod 吗？\n（此操作不可恢复）\n\n"
+            + "\n".join("· " + n for n in mod_names),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
 
         try:
             for mod_name, _ in selected:
@@ -4438,7 +4445,6 @@ class OnlineModPage(QWidget):
         self._batch_results.clear()
         if all(ok for _label, ok, _msg in results):
             self._show_copy_tip("安装完成")
-            QMessageBox.information(self, "下载安装完成", "全部 Mod 安装完成")
         else:
             fails = [f"· {label}：{msg}" for label, ok, msg in results if not ok]
             QMessageBox.critical(self, "下载安装失败", "存在失败项：\n" + "\n".join(fails))

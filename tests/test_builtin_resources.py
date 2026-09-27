@@ -74,8 +74,8 @@ class BuiltinVanillaBackupTests(unittest.TestCase):
             return_value={"ok": ok, "version": "1.5.78.11833" if ok else "",
                           "message": "ok" if ok else "版本不符"})
 
-    def test_restore_uses_builtin_when_vanilla_missing(self):
-        """当前是模组版且缺 .v：应用内置 1.5.78 原版 dll 离线还原"""
+    def test_restore_uses_builtin_vanilla_without_backup(self):
+        """当前是模组版：还原直接把内置 1.5.78 原版 dll 复制回当前 dll，不写 .v。"""
         with open(self.cur, "wb") as f:
             f.write(b"ModHooks-injected")  # 模组版
         fake_vanilla = os.path.join(self.tmp, "vanilla.dll")
@@ -83,17 +83,19 @@ class BuiltinVanillaBackupTests(unittest.TestCase):
             f.write(b"vanilla-original")
 
         with self._patch_version(True), \
-             mock.patch.object(installer, "get_builtin_path", return_value=fake_vanilla):
+             mock.patch.object(installer, "get_builtin_path", return_value=fake_vanilla), \
+             mock.patch.dict("core.game_version.KNOWN_VANILLA_DLL",
+                             {hashlib.sha256(b"vanilla-original").hexdigest(): "1.5.78.11833"}):
             result = installer.restore_vanilla(self.tmp)
 
         self.assertTrue(result["ok"])
-        self.assertTrue(os.path.isfile(self.van), "内置原版应被补为 .v")
-        with open(self.van, "rb") as f:
+        self.assertFalse(os.path.isfile(self.van), "不应写 .v 备份文件")
+        with open(self.cur, "rb") as f:
             self.assertEqual(f.read(), b"vanilla-original")
         self.assertFalse(installer._is_modded_dll(self.cur), "还原后当前 dll 必须是原版")
 
-    def test_restore_rejects_non_1_5_78_even_with_builtin(self):
-        """非 1.5.78：即便内置原版存在也不能用（内置只针对 1.5.78）"""
+    def test_restore_does_not_gate_on_version(self):
+        """还原 API 不拦版本门禁：直接把内置原版写回（对齐历史行为）。"""
         with open(self.cur, "wb") as f:
             f.write(b"ModHooks-injected")
         fake_vanilla = os.path.join(self.tmp, "vanilla.dll")
@@ -101,12 +103,13 @@ class BuiltinVanillaBackupTests(unittest.TestCase):
             f.write(b"vanilla-original")
 
         with self._patch_version(False), \
-             mock.patch.object(installer, "get_builtin_path", return_value=fake_vanilla):
+             mock.patch.object(installer, "get_builtin_path", return_value=fake_vanilla), \
+             mock.patch.dict("core.game_version.KNOWN_VANILLA_DLL",
+                             {hashlib.sha256(b"vanilla-original").hexdigest(): "1.5.78.11833"}):
             result = installer.restore_vanilla(self.tmp)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "no_vanilla_backup")
-        self.assertFalse(os.path.isfile(self.van), "非 1.5.78 不应写入内置原版")
+        self.assertTrue(result["ok"], "还原不依赖版本门禁")
+        self.assertFalse(os.path.isfile(self.van), "不应写 .v 备份文件")
 
 
 class BuiltinResourcesCommittedTests(unittest.TestCase):
@@ -121,7 +124,8 @@ class BuiltinResourcesCommittedTests(unittest.TestCase):
         self.assertTrue(zipfile.is_zipfile(api_zip), "内置 API 包必须是合法 zip")
         self.assertTrue(os.path.isfile(vanilla), "内置 1.5.78 原版 dll 必须随仓库提交")
 
-        h = hashlib.sha256(open(vanilla, "rb").read()).hexdigest()
+        with open(vanilla, "rb") as fh:
+            h = hashlib.sha256(fh.read()).hexdigest()
         self.assertIn(h, KNOWN_VANILLA_DLL,
                       "内置原版 dll 必须与游戏版本指纹表里的 1.5.78 一致")
 
