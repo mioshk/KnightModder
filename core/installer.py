@@ -917,13 +917,9 @@ class DependencyResolver:
                 repo_elem = mod.find('./Repository')
                 repository = repo_elem.text.strip() if repo_elem is not None and repo_elem.text else ""
 
-                # 提取 README（可选字段）：优先中文 <ReadmeCN>，没有再退回 <Readme>。
-                # 多数小仓库其实没有 README.md，所以允许作者在 XML 里直接提供正文。
-                readme_cn_elem = mod.find('./ReadmeCN')
-                readme_cn = (readme_cn_elem.text or "").strip() if readme_cn_elem is not None else ""
-                readme_elem = mod.find('./Readme')
-                readme_en = (readme_elem.text or "").strip() if readme_elem is not None else ""
-                readme = readme_cn or readme_en
+                # README 不再由 XML 提供：统一从 GitHub 仓库拉取（见 ui/mod_page.py 的
+                # fetch_readme）。这里始终留空，避免旧 XML 里残留的 <Readme> 被误用。
+                readme = ""
 
                 self.all_mods.add(name)
 

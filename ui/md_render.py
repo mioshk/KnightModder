@@ -15,7 +15,7 @@ Qt 富文本 CSS 子集的几个坑（都实测过，改样式时别踩）：
 """
 import re
 
-from PySide6.QtGui import QTextBlockFormat, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QTextBrowser
 
 try:
@@ -56,6 +56,9 @@ _IMG_WIDTH_ATTR_RE = re.compile(
 
 # 独占一行的 <img>（markdown 里把图单独写一行时 markdown-it 会产出裸标签）
 _STANDALONE_IMG_RE = re.compile(r"(?m)^[ \t]*(<img\b[^>]*>)[ \t]*$", re.I)
+
+# 含图片的段落（<p>...</p>，用于把行距退回 100%）
+_IMG_PARA_RE = re.compile(r"(<p(?:\s[^>]*)?>)(.*?)</p>", re.S)
 
 
 def _img_src(tag):
@@ -160,6 +163,24 @@ def _wrap_standalone_img(html):
     return _STANDALONE_IMG_RE.sub(lambda m: "<p>%s</p>" % m.group(1), html)
 
 
+def _relax_image_paragraphs(html):
+    """把「含图片的段落」的行距退回 100%。
+
+    样式表给 p/li/td/th 设了 line-height:1.75；一张图落在这个行里时，Qt 会按比例
+    把整行放大，图下方凭空多出一截空白（实测同一段落 215 → 364）。
+
+    这里在**源头**给含图的 <p> 写死 line-height:100%，而不是渲染成文档后再去改块的
+    行距属性——Qt 富文本里对某个块 setBlockFormat 会波及别的块，实测会让 27 个正文块
+    高度塌成 0、整段内容看不见。改在 HTML 层既修好多余行距，又完全不碰其它块。
+    """
+    def _sub(m):
+        tag, inner = m.group(1), m.group(2)
+        if "<img" in inner.lower():
+            return '<p style="line-height:100%">' + inner + "</p>"
+        return m.group(0)
+    return _IMG_PARA_RE.sub(_sub, html)
+
+
 def render_markdown(text, available_images=None, drop_unavailable=False):
     """Markdown 文本 → HTML 片段；解析失败返回 None（调用方应退回 setMarkdown）。
 
@@ -177,6 +198,7 @@ def render_markdown(text, available_images=None, drop_unavailable=False):
     html = _PRE_CODE_RE.sub(lambda m: m.group(1) + m.group(2) + m.group(3), html)
     html = _process_images(html, available_images, drop_unavailable)
     html = _wrap_standalone_img(html)
+    html = _relax_image_paragraphs(html)
     return html
 
 
@@ -261,40 +283,4 @@ class MarkdownBrowser(QTextBrowser):
             self.setMarkdown(text or "")
         else:
             self.setHtml(html)
-            self._reset_line_height_on_image_blocks()
         self.moveCursor(QTextCursor.Start)
-
-    @staticmethod
-    def _block_has_image(block):
-        it = block.begin()
-        while it != block.end():
-            frag = it.fragment()
-            if frag.isValid():
-                cf = frag.charFormat()
-                if cf.isImageFormat():
-                    return True
-            it += 1
-        return False
-
-    def _reset_line_height_on_image_blocks(self):
-        """把「含图片的块」的行距还原成默认值。
-
-        Qt 的比例行距是按**整行**放大的，那一行里只要有张图，就会按图高乘比例
-        预留空间：200px 的图配 1.75 的行距，这一行会变成 350px，图下方凭空多出
-        150px 空白（实测块高 364 vs 215）。
-
-        README 常见写法是 <img ...><br>正文，图和正文同处一块，所以中招概率很高。
-        CSS 没法只对「不含图片的段落」生效，只能在渲染后逐块修正：带图的行距在
-        Qt 里是块级属性，改不了单行，这里整块退回默认行距——代价是该块里的文字
-        行距变紧凑，但这类块通常只有一两行正文，换来的是不再有大白块。
-        """
-        doc = self.document()
-        cursor = QTextCursor(doc)
-        block = doc.begin()
-        while block.isValid():
-            if self._block_has_image(block):
-                bf = block.blockFormat()
-                bf.setLineHeight(0.0, QTextBlockFormat.SingleHeight.value)
-                cursor.setPosition(block.position())
-                cursor.setBlockFormat(bf)
-            block = block.next()

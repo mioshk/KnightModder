@@ -43,11 +43,11 @@ from PySide6.QtWidgets import (
     QTextBrowser,
 )
 from PySide6.QtGui import (QFont, QCursor, QPixmap, QPainter, QDesktopServices,
-                           QTextCursor, QImage)
+                           QTextCursor, QImage, QColor, QTextDocument)
 from urllib.parse import urljoin, quote
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
-from ui.md_render import MarkdownBrowser, collect_image_widths, lookup_url
+from ui.md_render import MarkdownBrowser, collect_image_widths, lookup_url, render_markdown
 
 try:  # 精简安装可能不带 QtSvg：图标渲染时优雅降级为文字
     from PySide6.QtSvg import QSvgRenderer
@@ -1017,19 +1017,22 @@ def _github_owner_repo(url):
     return f"{owner}/{repo}" if owner and repo else ""
 
 
-def fetch_readme(repo_url, timeout=8, total_budget=20, ssl_warn_callback=None):
+def fetch_readme(repo_url, timeout=6, total_budget=30, ssl_warn_callback=None):
     """
-    拉取 Mod 仓库的 README.md，返回 (markdown 原文, base_url)。
+    拉取 Mod 仓库的 README（任意大小写 / 子目录均可），返回 (markdown 原文, base_url)。
 
-    国内可达性实测（本机「强制直连」、不走系统代理）：
-      cdn.jsdelivr.net          200  ✅  主用
-      gcore.jsdelivr.net        200  ✅  jsDelivr 备用域名
-      fastly.jsdelivr.net       失败（仅代理可用）
-      raw.githubusercontent.com 失败（证书拦截；verify=False 亦读超时）
+    为什么是「并发竞速」而不是「串行逐个试」：
+      能直连的 CDN 只有 jsDelivr，且它对文件名大小写敏感，没法真正「忽略大小写」；
+      而国内直连每个请求可能 3~9s、连 404 都要等满超时。若串行逐个试，几个请求就能把
+      预算耗光——既慢又容易失败。所以改为把所有候选**同时**发出去，谁先成功用谁，
+      总耗时≈最快那个响应（走系统代理时通常 1~3s）。
 
-    所以把 jsDelivr 系域名全部排前面，raw.githubusercontent 仅作最后兜底
-    （对开了代理/VPN 的用户仍有效）；并用 total_budget 限制总耗时，
-    避免在国内网络下逐个超时把界面拖住。
+    并发候选（取第一个成功）：
+      - cdn.jsdelivr.net 的 README.md / readme.md：覆盖绝大多数仓库，最快；
+      - jsDelivr 清单 API（data.jsdelivr.com）在 main / master 分支上大小写不敏感地
+        定位真实文件名，覆盖 ReadMe.md / readme.md / docs/README.md 等稀有写法；
+      - raw.githubusercontent.com：仅对开了代理/VPN 的用户有效。
+    total_budget 限制总等待时间，避免极端网络下拖住界面。
 
     base_url 为 README 所在目录，用于解析其中的相对图片/链接。
     """
@@ -1041,28 +1044,96 @@ def fetch_readme(repo_url, timeout=8, total_budget=20, ssl_warn_callback=None):
         from utils.common import safe_requests_get
     except Exception:
         return "", fallback_base
-    # jsDelivr 省略版本号即取默认分支；HEAD 同理，覆盖非 main/master 的仓库
-    urls = (
-        f"https://cdn.jsdelivr.net/gh/{owner_repo}/README.md",
-        f"https://gcore.jsdelivr.net/gh/{owner_repo}/README.md",
-        f"https://fastly.jsdelivr.net/gh/{owner_repo}/README.md",
-        f"https://raw.githubusercontent.com/{owner_repo}/HEAD/README.md",
-        f"https://raw.githubusercontent.com/{owner_repo}/main/README.md",
-        f"https://raw.githubusercontent.com/{owner_repo}/master/README.md",
-    )
-    deadline = time.time() + total_budget
-    for u in urls:
-        if time.time() > deadline:
-            break
+
+    def _get(url):
+        """取单个 URL；200 且非空返回 (text, base_url)，否则 None。"""
         try:
-            r = safe_requests_get(u, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
-            if r is not None and getattr(r, "status_code", 0) == 200:
-                text = r.content.decode("utf-8", errors="replace")
-                if text.strip():
-                    return text, u.rsplit("/", 1)[0] + "/"
+            r = safe_requests_get(url, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
         except Exception:
-            continue
-    return "", fallback_base
+            return None
+        if r is not None and getattr(r, "status_code", 0) == 200:
+            text = r.content.decode("utf-8", errors="replace")
+            if text.strip():
+                return text, url.rsplit("/", 1)[0] + "/"
+        return None
+
+    def _via_list_api(branch):
+        """清单 API 大小写不敏感定位真实文件名，再取正文。"""
+        api = f"https://data.jsdelivr.com/v1/packages/gh/{owner_repo}@{branch}"
+        try:
+            r = safe_requests_get(api, timeout=timeout, ssl_warn_callback=ssl_warn_callback)
+        except Exception:
+            return None
+        if r is None or getattr(r, "status_code", 0) != 200:
+            return None
+        try:
+            tree = r.json()
+        except Exception:
+            return None
+        fn = _find_readme_in_tree(tree.get("files", []))
+        if not fn:
+            return None
+        return _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/{fn}")
+
+    tasks = [
+        lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/README.md"),
+        lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/readme.md"),
+        lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/Readme.md"),
+        lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/ReadMe.md"),
+        lambda: _via_list_api("main"),
+        lambda: _via_list_api("master"),
+        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/HEAD/README.md"),
+        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/main/README.md"),
+        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/master/README.md"),
+    ]
+
+    # 并发竞速：谁先成功谁胜出。用 daemon 线程，拿到结果立即返回，不等慢任务；
+    # 若所有候选都失败，则由最后一个结束的线程投一个 None 哨兵，立即收工（不等满预算）。
+    import threading
+    import queue as _queue
+    result_q = _queue.Queue()
+    _lock = threading.Lock()
+    _state = {"done": 0}
+
+    def _worker(fn):
+        try:
+            res = fn()
+        except Exception:
+            res = None
+        if res:
+            result_q.put(res)
+        with _lock:
+            _state["done"] += 1
+            if _state["done"] == len(tasks):
+                result_q.put(None)  # 全部结束且无人成功的哨兵
+
+    for fn in tasks:
+        threading.Thread(target=_worker, args=(fn,), daemon=True).start()
+
+    try:
+        res = result_q.get(timeout=total_budget)
+    except _queue.Empty:
+        return "", fallback_base
+    return res if res else ("", fallback_base)
+
+
+def _find_readme_in_tree(nodes):
+    """在 jsDelivr 文件树里大小写不敏感地找 README，返回相对路径（含子目录）。"""
+    found = []
+    def _walk(ns, prefix=""):
+        for n in ns:
+            if n.get("type") == "directory":
+                _walk(n.get("files", []), prefix + n.get("name", "") + "/")
+            else:
+                nm = n.get("name", "")
+                if nm.lower().startswith("readme"):
+                    found.append(prefix + nm)
+    _walk(nodes)
+    if not found:
+        return ""
+    # 优先 .md、再优先层级更浅（根目录优先），尽量拿到最像「项目说明」的那个
+    found.sort(key=lambda x: (not x.lower().endswith(".md"), x.count("/"), x))
+    return found[0]
 
 
 # README 里两种图片写法：markdown ![](x) 与原生 HTML <img src="x">
@@ -1160,6 +1231,7 @@ def _rasterize_svg(content):
         if not renderer.isValid():
             return None
         size = renderer.defaultSize()
+        intrinsic = None if size.isEmpty() else QSize(size)
         if size.isEmpty():
             size = QSize(_SVG_MIN_SIDE, _SVG_MIN_SIDE)
         side = max(size.width(), size.height(), 1)
@@ -1172,6 +1244,11 @@ def _rasterize_svg(content):
         painter = QPainter(img)
         renderer.render(painter)
         painter.end()
+        # 记下 SVG 的**原始逻辑尺寸**：shields.io 徽章这类小图应按原尺寸显示（GitHub
+        # 亦然），而不是这里的放大栅格尺寸——否则徽章会被撑成盖满半屏的巨幅。
+        if intrinsic is not None:
+            img.setText("intrinsic_w", str(intrinsic.width()))
+            img.setText("intrinsic_h", str(intrinsic.height()))
         return img
     except Exception:
         return None
@@ -1202,7 +1279,7 @@ def _download_image(url, timeout=10, ssl_warn_callback=None):
         return None
 
 
-def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
+def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None, on_each=None):
     """
     预下载 README 里的**原图**，返回 {url: QImage}（失败的跳过，不影响正文）。
 
@@ -1213,6 +1290,8 @@ def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
 
     这里保留原图不缩放：内联显示时的缩窄由 _ReadmeBrowser 懒处理，
     点击图片预览时才能看到真正的原始尺寸。
+
+    on_each(key, qimage)：每下好一张就回调一次，便于「下好一张显示一张」的增量渲染。
     """
     result = {}
     if not urls:
@@ -1229,6 +1308,8 @@ def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None):
             img = _download_image(_proxy_url(u), timeout, ssl_warn_callback)
         if img is not None:
             result[u] = img
+            if on_each is not None:
+                on_each(u, img)
     return result
 
 
@@ -1270,8 +1351,9 @@ class _ReadmeBrowser(MarkdownBrowser):
       - 内联显示按需缩窄并缓存，避免每次重绘都重新缩放。
     """
 
-    # README 的图全走本地缓存，缓存里没有的（下载失败/被墙）就没有渲染出来的可能，
-    # 直接删掉，免得 Qt 画一个裂图占位方块。
+    # README 的图全走本地缓存，缓存里没有的（下载失败/被墙）最终（配图全部到齐后）
+    # 会整段删掉，免得 Qt 画裂图占位方块。但在「正文先到、配图后到」的加载途中，
+    # 我们不删图、而是用 _make_placeholder() 占位，加载完再替换为真图。
     drop_unavailable_images = True
 
     # 视口左右留点余量，别让图片顶到边框/滚动条上
@@ -1283,6 +1365,7 @@ class _ReadmeBrowser(MarkdownBrowser):
         self._images = images or {}   # 原图（点击预览用）
         self._scaled = {}             # 内联用的位图（懒缓存，按「显示宽度 + DPR」失效）
         self._requested = {}          # 作者在 <img width="N"> 里写死的显示宽度
+        self._images_pending = False  # 配图还在后台下载中（此时不可用图显示占位图）
 
     def available_image_urls(self):
         # 交给 render_markdown：判断哪些图真能加载出来，加载不出来的直接删掉
@@ -1291,23 +1374,101 @@ class _ReadmeBrowser(MarkdownBrowser):
     def set_markdown(self, text):
         # 尺寸属性在渲染时会被统一剥掉（见 md_render._process_images），
         # 这里先把作者想要的宽度读回来，出图时按它复现。
+        self._md = text
         self._requested = collect_image_widths(text)
         self._scaled.clear()
-        super().set_markdown(text)
+        # 配图还在下载（pending）→ 保留不可用 <img> 标签，由 loadResource 出占位图；
+        # 配图已到齐 → 真正加载不出来的（下载失败）按原逻辑整段删掉。
+        drop = not self._images_pending
+        html = render_markdown(text, self.available_image_urls(), drop)
+        if html is None:
+            self.setMarkdown(text or "")
+        else:
+            self.setHtml(html)
+        self.moveCursor(QTextCursor.Start)
+
+    def refresh(self, clear_cache=False):
+        """配图增量到齐时局部重渲染：沿用当前 markdown，仅刷新图片。
+
+        不清 _scaled 缓存（clear_cache=False）时，已显示的真图不会被重新缩放，
+        只有新到/替换的那张失效，开销最低；滚动位置由调用方保存恢复。
+        """
+        md = getattr(self, "_md", None)
+        if not md:
+            return
+        if clear_cache:
+            self._scaled.clear()
+        drop = not self._images_pending
+        html = render_markdown(md, self.available_image_urls(), drop)
+        if html is None:
+            self.setMarkdown(md)
+        else:
+            self.setHtml(html)
 
     def _display_width(self, key):
-        """这张图该显示多宽（逻辑像素）：作者写死的宽度优先，但不超出视口。"""
+        """这张图该显示多宽（逻辑像素）：作者写死的宽度优先，但不超出视口。
+
+        作者没写宽度时，用图片的「自然宽度」：普通位图即像素宽；SVG（如 shields.io
+        徽章）用其**矢量原始尺寸**（栅格化时记在 intrinsic_w），否则会按放大到几百
+        像素的位图宽度显示，徽章被撑成巨幅。
+        """
         limit = max(self._MIN_WIDTH, self.viewport().width() - self._SIDE_PAD)
-        natural = self._images[key].width() or limit
+        img = self._images[key]
+        natural = img.width() or limit
+        iw = img.text("intrinsic_w")
+        if iw:
+            try:
+                natural = int(iw) or natural
+            except ValueError:
+                pass
         want = lookup_url(self._requested, key) or natural
         return max(1, min(int(want), limit))
 
+    def set_images(self, images):
+        """替换图片缓存（用于「正文先出、配图后到」的渐进加载）。"""
+        self._images = images or {}
+        self._scaled.clear()
+
     def loadResource(self, type_, url):
-        if url.isValid():
+        if type_ == QTextDocument.ImageResource and url.isValid():
             key = url.toString()
             if key in self._images:
                 return self._image_for(key)
+            # 配图尚未下载完：给个「图片加载中…」占位图，免得空白一片
+            if self._images_pending:
+                return self._make_placeholder()
         return super().loadResource(type_, url)
+
+    _PLACEHOLDER_CACHE = {}
+
+    def _make_placeholder(self):
+        """图片还没下载好时用的占位图：灰底 + 居中提示，按视口宽度预留空间。
+
+        缓存按（显示宽度, DPR）失效；窗口缩放或换屏后会自动重出。
+        """
+        dpr = self.devicePixelRatioF() or 1.0
+        w = max(self._MIN_WIDTH, min(self.viewport().width() - self._SIDE_PAD, 480))
+        h = max(60, int(round(w * 9.0 / 16.0)))
+        cache_key = (int(w), round(dpr, 3))
+        cached = _ReadmeBrowser._PLACEHOLDER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        px = max(1, int(round(w * dpr)))
+        py = max(1, int(round(h * dpr)))
+        img = QImage(px, py, QImage.Format_ARGB32)
+        img.fill(QColor("#23232b"))
+        p = QPainter(img)
+        p.setPen(QColor("#3a3a44"))
+        p.drawRect(0, 0, px - 1, py - 1)
+        p.setPen(QColor("#8a8a99"))
+        f = QFont("Microsoft YaHei")
+        f.setPixelSize(max(11, int(px * 0.045)))
+        p.setFont(f)
+        p.drawText(img.rect(), Qt.AlignCenter, "🖼 图片加载中…")
+        p.end()
+        img.setDevicePixelRatio(dpr)
+        _ReadmeBrowser._PLACEHOLDER_CACHE[cache_key] = img
+        return img
 
     def _image_for(self, key):
         """
@@ -1382,9 +1543,15 @@ class _ReadmeBrowser(MarkdownBrowser):
 
 
 class _ReadmeWorker(QThread):
-    """后台拉取 README 及其配图：网络请求不能卡住 UI 主线程。"""
+    """后台拉取 README 及其配图：网络请求不能卡住 UI 主线程。
 
-    done = Signal(str, object, str, str)  # (markdown, {url: QImage}, base_url, 错误信息)
+    分两批回调：**正文先到先渲染**（弹窗能立刻出内容），配图下载完再补上。
+    这样即便配图多、下载慢，用户也不用等到全部就绪才看到正文。
+    """
+
+    text_ready = Signal(str, str, str)   # (markdown, base_url, 错误信息)
+    image_ready = Signal(str, object)     # (url, QImage) 每下好一张发一次
+    images_ready = Signal(object)        # {url: QImage} 全部完成（失败项已剔除）
 
     def __init__(self, repo_url, parent=None):
         super().__init__(parent)
@@ -1394,18 +1561,21 @@ class _ReadmeWorker(QThread):
         try:
             text, base = fetch_readme(self.repo_url)
         except Exception as e:
-            self.done.emit("", {}, "", f"获取 README 失败：{e}")
+            self.text_ready.emit("", "", f"获取 README 失败：{e}")
             return
         if not text:
-            self.done.emit(
-                "", {}, base,
+            self.text_ready.emit(
+                "", base,
                 "未能获取 README：该仓库可能没有 README.md，或当前网络无法访问 GitHub。")
             return
+        self.text_ready.emit(text, base, "")
         try:
-            images = fetch_readme_images(_collect_remote_images(text, base))
+            images = fetch_readme_images(
+                _collect_remote_images(text, base),
+                on_each=lambda k, img: self.image_ready.emit(k, img))
         except Exception:
             images = {}
-        self.done.emit(text, images, base, "")
+        self.images_ready.emit(images)
 
 
 class _TranslateWorker(QThread):
@@ -1427,115 +1597,185 @@ class _TranslateWorker(QThread):
         self.done.emit(text or "", "")
 
 
-def show_readme_dialog(parent, title, markdown, images=None, base_url=""):
-    """展示 README 弹窗（markdown 渲染；配图走预下载缓存）。内容由调用方提前取好。"""
-    dlg = QDialog(parent)
-    dlg.setWindowTitle(f"README — {title}")
-    dlg.resize(800, 600)
-    dlg.setStyleSheet("QDialog { background-color: #1a1a1a; }")
+# 后台 README 线程的存活引用：弹窗可能在加载途中被关闭，线程既不能被 GC 回收，
+# 也不能随弹窗一起析构（QThread 运行中析构会告警甚至崩溃）。完成后自行清理。
+_ACTIVE_README_WORKERS = set()
 
-    layout = QVBoxLayout(dlg)
-    layout.setContentsMargins(18, 16, 18, 16)
-    layout.setSpacing(10)
 
-    browser = _ReadmeBrowser(images)
-    browser.setStyleSheet("""
-        QTextBrowser {
-            background-color: #1c1c20;
-            border: 1px solid #33333c;
-            border-radius: 8px;
-            padding: 16px 18px;
-        }
-    """)
-    def _apply(md):
-        browser.set_markdown(_isolate_image_lines(md))
-        if base_url:
+class _ReadmeDialog(QDialog):
+    """README 弹窗：点开**立即**出现，先在窗口内显示「正在加载…」，
+    正文一到就渲染、配图随后补上——不再等全部加载完才弹窗。
+
+    markdown 非空 → 直接展示；markdown 为空且给了 repo_url → 立即进入加载态并后台拉取。
+    """
+
+    def __init__(self, parent, title, markdown="", images=None, base_url="", repo_url=""):
+        super().__init__(parent)
+        self.setWindowTitle(f"README — {title}")
+        self.resize(800, 600)
+        self.setStyleSheet("QDialog { background-color: #1a1a1a; }")
+
+        self._repo_url = repo_url or ""
+        self._base_url = base_url or ""
+        self._original_md = markdown or ""
+        self._cache = {"translated": None}
+        self._showing = {"translated": False}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        self._browser = _ReadmeBrowser(images or {})
+        self._browser.setStyleSheet("""
+            QTextBrowser {
+                background-color: #1c1c20;
+                border: 1px solid #33333c;
+                border-radius: 8px;
+                padding: 16px 18px;
+            }
+        """)
+        layout.addWidget(self._browser, stretch=1)
+
+        btn_row = QHBoxLayout()
+        self._trans_btn = QPushButton("🌐 一键翻译")
+        self._trans_btn.setFixedSize(120, 34)
+        self._trans_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        self._trans_btn.setStyleSheet("""
+            QPushButton {
+                background: #2a2a32; color: #7ab8ff;
+                border: 1px solid #3a3a44; border-radius: 8px;
+                font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background: #34343e; }
+            QPushButton:disabled {
+                color: #4f4f5c; border-color: #33333c; background: transparent;
+            }
+        """)
+        self._trans_btn.setEnabled(False)
+        self._trans_btn.clicked.connect(self._on_translate)
+        btn_row.addWidget(self._trans_btn)
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedSize(100, 34)
+        close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #2a2a32; color: #d8d8e0;
+                border: 1px solid #3a3a44; border-radius: 8px;
+                font-size: 13px; font-weight: bold;
+            }
+            QPushButton:hover { background: #34343e; }
+        """)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        if self._original_md:
+            self._apply(self._original_md)
+            self._trans_btn.setEnabled(True)
+        elif self._repo_url:
+            self._show_notice("正在加载 README…")
+            self._start_load()
+        else:
+            self._show_notice("该 Mod 未配置仓库地址，无法获取 README")
+
+    # ---------- 内容展示 ----------
+    def _show_notice(self, text, color="#9ea3b5"):
+        self._browser.setHtml(
+            '<div style="color:%s; font-size:11pt;">%s</div>' % (color, text))
+
+    def _apply(self, md):
+        self._browser.set_markdown(_isolate_image_lines(md))
+        if self._base_url:
             # 让 README 里的相对图片/链接能解析到仓库目录（需在 setMarkdown 之后设置）
-            browser.document().setBaseUrl(QUrl(base_url))
-        browser.moveCursor(QTextCursor.Start)
+            self._browser.document().setBaseUrl(QUrl(self._base_url))
+        self._browser.moveCursor(QTextCursor.Start)
 
-    _apply(markdown)
-    layout.addWidget(browser, stretch=1)
+    # ---------- 后台加载 ----------
+    def _start_load(self):
+        worker = _ReadmeWorker(self._repo_url)
+        _ACTIVE_README_WORKERS.add(worker)
+        worker.text_ready.connect(self._on_text)
+        worker.image_ready.connect(self._on_image_ready)
+        worker.images_ready.connect(self._on_images)
+        worker.finished.connect(
+            lambda: (_ACTIVE_README_WORKERS.discard(worker), worker.deleteLater()))
+        worker.start()
 
-    # 翻译状态：译文只在首次点击时取一次，之后在原文/译文间来回切换
-    original_md = markdown
-    cache = {"translated": None}
-    showing = {"translated": False}
+    def _on_text(self, text, base_url, err):
+        if not text:
+            self._show_notice(err or "未能获取该 Mod 的 README", "#e08080")
+            return
+        self._original_md = text
+        self._base_url = base_url or self._base_url
+        # 配图还在后台下载：正文先渲染，图片位置用占位图占着
+        self._browser._images_pending = True
+        self._apply(text)
+        self._trans_btn.setEnabled(True)
 
-    btn_row = QHBoxLayout()
+    def _on_image_ready(self, key, qimage):
+        """配图下好一张就显示一张：增量更新缓存并局部重渲染（保留滚动位置）。"""
+        if not self._original_md:
+            return
+        bar = self._browser.verticalScrollBar()
+        pos = bar.value()
+        self._browser._images[key] = qimage        # 增量写入，不覆盖已到的图
+        self._browser._scaled.pop(key, None)        # 这张的缩略缓存失效
+        self._browser._images_pending = True       # 仍处加载中 → 其余图继续占位
+        self._browser.refresh(clear_cache=False)
+        bar.setValue(min(pos, bar.maximum()))
 
-    trans_btn = QPushButton("🌐 一键翻译")
-    trans_btn.setFixedSize(120, 34)
-    trans_btn.setCursor(QCursor(Qt.PointingHandCursor))
-    trans_btn.setStyleSheet("""
-        QPushButton {
-            background: #2a2a32; color: #7ab8ff;
-            border: 1px solid #3a3a44; border-radius: 8px;
-            font-size: 13px; font-weight: bold;
-        }
-        QPushButton:hover { background: #34343e; }
-        QPushButton:disabled {
-            color: #4f4f5c; border-color: #33333c; background: transparent;
-        }
-    """)
+    def _on_images(self, images):
+        """配图全部到齐：把真正加载不出来的图整段删掉（不再占位）并重渲染。"""
+        if not self._original_md:
+            return
+        bar = self._browser.verticalScrollBar()
+        pos = bar.value()
+        self._browser.set_images(images)
+        # 配图已经到齐：后续渲染把真正加载不出来的图整段删掉（不再占位）
+        self._browser._images_pending = False
+        md = self._cache["translated"] if self._showing["translated"] else self._original_md
+        self._apply(md or self._original_md)
+        bar.setValue(min(pos, bar.maximum()))
 
-    def _on_translate():
-        if showing["translated"]:
+    # ---------- 翻译 ----------
+    def _on_translate(self):
+        if self._showing["translated"]:
             # 当前是译文 -> 切回原文
-            showing["translated"] = False
-            _apply(original_md)
-            trans_btn.setText("🌐 一键翻译")
+            self._showing["translated"] = False
+            self._apply(self._original_md)
+            self._trans_btn.setText("🌐 一键翻译")
             return
-        if cache["translated"] is not None:
+        if self._cache["translated"] is not None:
             # 已翻过 -> 直接复用，不再发请求
-            showing["translated"] = True
-            _apply(cache["translated"])
-            trans_btn.setText("📄 显示原文")
+            self._showing["translated"] = True
+            self._apply(self._cache["translated"])
+            self._trans_btn.setText("📄 显示原文")
             return
 
-        trans_btn.setEnabled(False)
-        trans_btn.setText("🌐 翻译中…")
-        QToolTip.showText(QCursor.pos(), "正在调用微软翻译…", trans_btn)
+        self._trans_btn.setEnabled(False)
+        self._trans_btn.setText("🌐 翻译中…")
+        QToolTip.showText(QCursor.pos(), "正在调用微软翻译…", self._trans_btn)
 
         def _done(text, err):
             QToolTip.hideText()
-            trans_btn.setEnabled(True)
+            self._trans_btn.setEnabled(True)
             if text:
-                cache["translated"] = text
-                showing["translated"] = True
-                _apply(text)
-                trans_btn.setText("📄 显示原文")
+                self._cache["translated"] = text
+                self._showing["translated"] = True
+                self._apply(text)
+                self._trans_btn.setText("📄 显示原文")
             else:
-                trans_btn.setText("🌐 一键翻译")
+                self._trans_btn.setText("🌐 一键翻译")
                 QMessageBox.information(
-                    dlg, "翻译失败",
+                    self, "翻译失败",
                     f"未能完成翻译：{err or '未知错误'}\n请检查网络后重试。")
 
-        worker = _TranslateWorker(original_md, dlg)
+        worker = _TranslateWorker(self._original_md, self)
         worker.done.connect(_done)
         # 持有引用，否则线程还在跑就被 GC 回收，信号永远等不到
-        dlg._translate_worker = worker
+        self._translate_worker = worker
         worker.start()
-
-    trans_btn.clicked.connect(_on_translate)
-    btn_row.addWidget(trans_btn)
-    btn_row.addStretch()
-    close_btn = QPushButton("关闭")
-    close_btn.setFixedSize(100, 34)
-    close_btn.setCursor(QCursor(Qt.PointingHandCursor))
-    close_btn.setStyleSheet("""
-        QPushButton {
-            background: #2a2a32; color: #d8d8e0;
-            border: 1px solid #3a3a44; border-radius: 8px;
-            font-size: 13px; font-weight: bold;
-        }
-        QPushButton:hover { background: #34343e; }
-    """)
-    close_btn.clicked.connect(dlg.accept)
-    btn_row.addWidget(close_btn)
-    layout.addLayout(btn_row)
-
-    dlg.exec()
 
 
 # ============================================================
@@ -1559,7 +1799,6 @@ class ModDetailPanel(QWidget):
         self._deps = []
         self._mod_name = ""
         self._readme_text = ""
-        self._readme_worker = None
         self._link_provider: Optional[Callable[[str], str]] = None
 
         # 标题卡片
@@ -1918,8 +2157,8 @@ class ModDetailPanel(QWidget):
         self.desc_en_lbl.setText(desc_en if desc_en.strip() else "")
         self.desc_en_lbl.setVisible(bool(desc_en.strip()))
 
-        # README：XML 自带的优先；为空时按钮会退而去仓库拉 README.md
-        self._readme_text = readme or ""
+        # README：统一从 GitHub 仓库拉取（XML 不再提供 readme 正文）
+        self._readme_text = ""
 
         # 原仓库：有 <Repository> 才显示，点击图标/链接跳转浏览器
         self._repo_url = repository.strip()
@@ -2029,41 +2268,12 @@ class ModDetailPanel(QWidget):
         event.accept()
 
     def _on_readme_clicked(self, _checked=False):
-        """README：优先用 XML 自带的 <Readme>；没有则后台去仓库拉 README.md。"""
-        if self._readme_worker is not None:
-            return
-        text = getattr(self, "_readme_text", "")
-        if text:
-            show_readme_dialog(self, self._mod_name, text)
-            return
-        # 注：走网络时下面会用 _ReadmeWorker 预下载配图后再弹窗
+        """README：点开立即弹窗，正文/配图在窗口内加载（不再等加载完才弹窗）。"""
         url = getattr(self, "_repo_url", "")
         if not url:
-            QMessageBox.information(self, "README", "该 Mod 没有 README，也未配置仓库地址")
+            QMessageBox.information(self, "README", "该 Mod 未配置仓库地址，无法获取 README")
             return
-        self.readme_btn.setEnabled(False)
-        QToolTip.showText(QCursor.pos(), "正在加载 README…", self.readme_btn)
-        self._readme_worker = _ReadmeWorker(url, self)
-        self._readme_worker.done.connect(self._on_readme_loaded)
-        self._readme_worker.start()
-
-    def _on_readme_loaded(self, text, images, base_url, err):
-        """README 拉取完成：恢复按钮并弹窗展示（或提示失败原因）。"""
-        worker = self._readme_worker
-        self._readme_worker = None
-        try:
-            self.readme_btn.setEnabled(True)
-            QToolTip.hideText()
-            if text:
-                show_readme_dialog(self, self._mod_name, text, images, base_url)
-            else:
-                QMessageBox.information(self, "README", err or "未能获取该 Mod 的 README")
-        finally:
-            if worker is not None:
-                try:
-                    worker.deleteLater()
-                except RuntimeError:
-                    pass
+        _ReadmeDialog(self, self._mod_name, repo_url=url).exec()
 
     def _on_share_icon_clicked(self, event):
         """复制「本 Mod + 全部前置依赖」的夸克链接，每行一条。"""
