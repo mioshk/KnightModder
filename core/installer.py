@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, STEAM_APPID, STEAM_RUN_URL, get_base_dir
+from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, MODLINKS_URLS, STEAM_APPID, STEAM_RUN_URL, get_base_dir
 from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path, get_builtin_path
 from core.quark import QuarkClient, QuarkError
 # API 的下载地址不再写死在 config 里，统一从 api_manifest.json（线上清单）读取
@@ -739,6 +739,15 @@ def is_mod_enabled(game_path, mod_name):
 
 # ==================== 依赖解析模块 ====================
 
+def _short_host(url: str) -> str:
+    """从 URL 里取出主机名，用于进度提示里简短显示来源（如 cdn.jsdelivr.net）。"""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc or url
+    except Exception:  # noqa: BLE001
+        return url
+
+
 class DependencyResolver:
     """Mod依赖解析器"""
 
@@ -789,50 +798,55 @@ class DependencyResolver:
 
     def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None) -> bool:
         """
-        从URL加载Mod依赖数据（CDN 优先、GitHub raw 兜底）
-        :param url: 自定义单源XML地址；默认使用 CDN + raw 双源容灾
+        从 URL 加载 Mod 依赖数据。
+
+        默认按 MODLINKS_URLS（jsDelivr + GitHub raw + 多个国内可达镜像）逐一尝试、
+        谁先成功用谁；全部失败才报错。很多大陆用户网络下 jsDelivr / raw.githubusercontent
+        都被墙或超时（本机实测 raw.githubusercontent.com 直接 12s 超时），于是旧版只试这两
+        个源时「更新链接」永远失败——多挂镜像能救回绝大多数。
+
+        :param url: 自定义单源地址（仍支持，但 UI 暂未暴露）；默认用多源列表
         :param progress_callback: 进度回调函数
         :return: 是否加载成功
         """
-        try:
-            if url:
-                # 显式传入单个地址：直接请求该地址
+        from utils.common import net_debug_log
+        sources = [url] if url else MODLINKS_URLS
+        first_net_err = None
+        last_err = None
+        for u in sources:
+            try:
                 if progress_callback:
-                    progress_callback("🔍 正在加载 Mod 链接...", "info")
+                    progress_callback(f"🔍 正在从 {_short_host(u)} 获取 Mod 数据...", "info")
+                net_debug_log(f"[ModLinks] 尝试 {u}")
                 response = safe_requests_get(
-                    url, timeout=15,
+                    u, timeout=15,
                     ssl_warn_callback=lambda msg: progress_callback(msg, "warning") if progress_callback else None
                 )
                 response.raise_for_status()
                 content = response.content
-            else:
-                if progress_callback:
-                    progress_callback("🔍 正在获取最新的 Mod 数据...", "info")
-                content, source = fetch_remote_content(
-                    MODLINKS_URL_CDN, MODLINKS_URL_RAW, timeout=15,
-                    ssl_warn_callback=lambda msg: progress_callback(msg, "warning") if progress_callback else None
-                )
-                if content is None:
-                    if progress_callback:
-                        progress_callback("❌ 网络请求失败，请检查网络连接", "error")
-                    return False
-                if source == "github-raw" and progress_callback:
-                    progress_callback("⚠️ 检测到远程数据未同步，已自动使用最新数据", "warning")
+                net_debug_log(f"[ModLinks] 成功 {u} ({len(content)} 字节)")
+            except Exception as e:  # noqa: BLE001 单个源失败不致命，换下一个
+                net_debug_log(f"[ModLinks] 失败 {u}: {type(e).__name__}: {e}")
+                if first_net_err is None:
+                    first_net_err = e
+                last_err = e
+                continue
 
             if progress_callback:
                 progress_callback("📥 正在解析 Mod 数据...", "info")
-
             if self._parse_xml_content(content, progress_callback):
                 # 解析成功后才写入本地缓存，避免坏数据覆盖缓存
                 self.save_cache(content)
                 return True
-            if progress_callback:
-                progress_callback("❌ 数据解析失败", "error")
-            return False
-        except Exception as e:
-            if progress_callback:
-                progress_callback(f"❌ Mod 链接加载失败：{e}", "error")
-            return False
+            net_debug_log(f"[ModLinks] 解析失败 {u}")
+            last_err = RuntimeError("数据解析失败（文件内容异常）")
+
+        if progress_callback:
+            if first_net_err is not None:
+                progress_callback(f"❌ Mod 链接加载失败：{first_net_err}", "error")
+            else:
+                progress_callback("❌ 所有来源都未返回有效数据，请检查网络连接", "error")
+        return False
 
     def _parse_xml_content(self, content, progress_callback: Optional[Callable] = None) -> bool:
         """解析XML内容"""

@@ -8,7 +8,9 @@
   2. 登录成功后从窗口里读回 Cookie（走 WebView2 官方的 Cookie 管理器，
      HttpOnly 的登录令牌 __pus / __puus 也读得到），自动用 account/info 接口
      联网验证，通过后写入 config.json 并关闭窗口；
-  3. 若当前系统没有可用的浏览器内核，或用户中途关闭窗口，回退到「手动粘贴 Cookie」。
+  3. 若首页右侧登录卡片没渲染出来（旧 WebView2 运行时会这样，见
+     QUARK_FALLBACK_LOGIN_URL 的说明），自动跳到夸克官方的独立登录页兜底；
+  4. 若当前系统没有可用的浏览器内核，或用户中途关闭窗口，回退到「手动粘贴 Cookie」。
 
 为什么不再用 QtWebEngine：
   QtWebEngine 等于把一整个 Chromium 塞进安装包（195 MB），占了软件体积的七成。
@@ -31,10 +33,42 @@ _COLOR_WARN = "#ff9800"
 
 QUARK_HOME_URL = "https://pan.quark.cn/"
 
+# 兜底登录页：夸克官方给"手机登录"用的独立登录页（服务端渲染的轻量表单）。
+#
+# 背景（这里踩过坑，别再改回去）：pan.quark.cn 首页的登录板块**不在 SSR 出来的
+# HTML 里**——返回的 <div class="first-screen"><div class="left">…</div>
+# <div class="right"></div></div> 中 .right 是空的，右侧那整块登录卡片（含扫码
+# 二维码）全靠首页那份阿里 CDN 上的客户端 JS（quark-cloud-drive-static-page）在
+# 运行时插入。该 JS 用了 Object.hasOwn 等较新的语法，**Win10 上较旧的 WebView2
+# 运行时会渲染失败**，结果就是"官网正常打开、但右侧没有登录板块"（静态内容都在，
+# 唯独 JS 才画的那块没了）。
+#
+# 这个兜底页是 <form> 服务端表单，只依赖几 KB 的 zepto 脚本，任何 WebView2 都能
+# 打开，因此当检测到首页登录卡片没渲染出来时自动改用它，保证用户仍能登录。
+QUARK_FALLBACK_LOGIN_URL = (
+    "https://uop.quark.cn/cas/custom/login?custom_login_type=mobile"
+    "&client_id=532&display=pc"
+)
+
 # 登录窗口最长等待时间（秒）；超时或用户关闭窗口都算未完成
 _LOGIN_TIMEOUT = 900
 # 轮询间隔（秒）
 _POLL_INTERVAL = 1.2
+# 首页打开后等待多久（秒）再检测登录卡片；给它足够时间加载 CDN 上的 JS
+_CARD_CHECK_DELAY = 8.0
+
+# 检测首页右侧登录卡片是否渲染出来了。返回 'ok' / 'empty' / 'no-container' / 'err'。
+# 只认夸克首页那个 .first-screen > .right 容器：它存在但内容为空，说明 JS 没把
+# 登录卡片画出来（旧 WebView2 渲染失败）。页面被用户导航走后返回 'no-container'，
+# 这种情况下不做兜底跳转。
+_JS_LOGIN_CARD_CHECK = (
+    "(function(){try{"
+    "var r=document.querySelector('.first-screen > .right');"
+    "if(!r){return 'no-container';}"
+    "var h=(r.innerHTML||'').trim();"
+    "return h.length>20?'ok':'empty';"
+    "}catch(e){return 'err';}})()"
+)
 
 
 def webview_available() -> bool:
@@ -125,6 +159,19 @@ def _evaluate_cookies(cookies, last_header):
     return bool(ok), header, msg
 
 
+def _login_card_missing(win) -> bool:
+    """首页右侧登录卡片是不是没渲染出来（旧 WebView2 上会这样）。
+
+    检测本身就可能抛异常（窗口正在导航、JS 被禁用等），任何异常都当作"不缺"处理，
+    即保持现状、不乱跳页。
+    """
+    try:
+        result = win.evaluate_js(_JS_LOGIN_CARD_CHECK)
+    except Exception:  # noqa: BLE001
+        return False
+    return str(result).strip().lower() == "empty"
+
+
 def run_webview_login(url: str = QUARK_HOME_URL, timeout: int = _LOGIN_TIMEOUT) -> dict:
     """弹出浏览器窗口让用户登录，返回 {"ok": bool, "header": str, "msg": str}。
 
@@ -134,8 +181,10 @@ def run_webview_login(url: str = QUARK_HOME_URL, timeout: int = _LOGIN_TIMEOUT) 
     import webview
 
     state = {"ok": False, "header": "", "msg": "", "error": ""}
+    # 窗口给到桌面宽度：万一夸克改了布局，宽一点更稳妥（不影响兜底逻辑）。
     win = webview.create_window(
-        "登录夸克网盘 —— 登录成功后本窗口会自动关闭", url, width=1020, height=780)
+        "登录夸克网盘 —— 登录成功后本窗口会自动关闭", url,
+        width=1180, height=800)
 
     def _poll(w):
         # 注意：last_header 必须是本函数的局部变量。若放到外层作用域，
@@ -144,8 +193,18 @@ def run_webview_login(url: str = QUARK_HOME_URL, timeout: int = _LOGIN_TIMEOUT) 
         # "登录成功了但窗口死活不关"。
         last = ""
         deadline = time.time() + timeout
+        # 首次等待期结束后检测一次首页登录卡片；缺失就一次性跳到兜底登录页
+        fallback_at = time.time() + _CARD_CHECK_DELAY
+        checked_card = False
         while time.time() < deadline:
             time.sleep(_POLL_INTERVAL)
+            if not checked_card and time.time() >= fallback_at:
+                checked_card = True
+                if _login_card_missing(w):
+                    try:
+                        w.load_url(QUARK_FALLBACK_LOGIN_URL)
+                    except Exception:  # noqa: BLE001
+                        pass
             try:
                 cookies = w.get_cookies()
             except Exception:  # noqa: BLE001 窗口正在导航时可能取不到

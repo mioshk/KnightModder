@@ -382,24 +382,23 @@ def maybe_import_config(dest):
 
 
 def check_dest(dest):
-    """检查安装位置是否可用，返回 (是否可用, 提示文字)"""
+    """检查安装位置是否可用，返回 (是否可用, 提示文字)。
+
+    只做"能否创建目录"和"磁盘空间"两项检查——这两项无论装到哪个盘都该拦。
+    不再做"写入权限探测"：旧版会往目标目录写一个隐藏点文件 .km_write_test 来判断
+    是否可写，但这步很容易被安全软件 / 个别盘符策略（尤其当选了 D:\\ 这种盘根目录时，
+    往盘根写隐藏点文件常被杀软当成可疑行为）直接拦掉，于是明明能正常安装却误报
+    "没有写入权限（请以管理员身份运行）"。真实写入能否成功，交给后面的释放文件步骤
+    去兜底即可，不必提前用这种容易被误伤的方式设卡。
+    """
     if not dest:
         return False, "请选择安装位置。"
     dest = _norm(dest)
     try:
-        parent = os.path.dirname(dest.rstrip("\\/")) or dest
         os.makedirs(dest, exist_ok=True)
     except Exception as e:
-        return False, f"无法在此位置创建文件夹（可能需要管理员权限）：{e}"
-    # 可写性
-    try:
-        probe = os.path.join(dest, ".km_write_test")
-        with open(probe, "w") as f:
-            f.write("x")
-        os.remove(probe)
-    except Exception as e:
-        return False, f"没有写入权限（可尝试以管理员身份运行）：{e}"
-    # 磁盘空间
+        return False, f"无法在此位置创建文件夹：{e}"
+    # 磁盘空间（仅当确实不够时才拦，避免装到会中途爆满的位置）
     try:
         free = shutil.disk_usage(dest).free
         if free < _ESTIMATED_BYTES:

@@ -434,6 +434,36 @@ def safe_requests_get(url, timeout=10, fallback_on_ssl=True, ssl_warn_callback=N
         return _ssl_fallback(kwargs)
 
 
+def net_debug_log(msg: str) -> None:
+    """网络诊断日志：始终追加到 %APPDATA%/KnightModder/network_debug.log。
+
+    用途：排查「Mod 链接加载失败」「更新检查失败」这类问题。把每次远程请求的
+    尝试 / 成功 / 报错（含异常类型与原因）都记下来，用户把这个文件发回来即可
+    精确定位是哪个源、什么错（连接超时 / SSL / 404 …），不用再靠猜。
+    始终开启（只追加写一行、开销极小），不影响正常功能。
+
+    同时打印到 stderr：这样 debug 版（console=True 的 exe）打开的黑框里也能直接
+    看到每次尝试/成功/失败，现场排查不用再去找那个文件。release 版是 console=False，
+    stderr 被丢弃，无任何副作用。
+    """
+    try:
+        import sys as _sys
+        import time as _t
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "KnightModder")
+        os.makedirs(d, exist_ok=True)
+        ts = _t.strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+        with open(os.path.join(d, "network_debug.log"), "a", encoding="utf-8") as _f:
+            _f.write(line)
+        try:
+            _sys.stderr.write(line)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001  日志本身绝不能影响主流程
+        pass
+
+
 def fetch_remote_content(cdn_url, raw_url, timeout=10, ssl_warn_callback=None):
     """
     多源容灾读取远程文件内容（字节）。

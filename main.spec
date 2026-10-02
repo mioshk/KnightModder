@@ -21,10 +21,18 @@ APP_NAME = 'KnightModder'
 # 存在的 exe 名了。
 _ONEDIR = os.environ.get('KM_ONEDIR') == '1'
 
+# KM_DEBUG=1 构建「调试版」：开控制台（能看到网络诊断日志），并在 exe 名带
+# 「调试版」字样。调试版用于排查「Mod 链接加载失败」这类问题——把日志发回来即可
+# 定位是哪个源、什么错。安装版的程序目录（KM_ONEDIR=1）必须固定叫 KnightModder.exe，
+# 所以调试开关下安装版的 exe 名不变，只有绿色单文件版才追加「调试版」。
+_DEBUG = os.environ.get('KM_DEBUG') == '1'
+
 # 绿色单文件版是分发出去的成品，文件名带版本号 + 「绿色版」字样，与安装版
 # （「KnightModder v<版本> 安装版.exe」）成对出现，一眼能分清哪个要装、哪个
 # 解压即用。
 EXE_NAME = APP_NAME if _ONEDIR else f'{APP_NAME} v{_ver_str} 绿色版'
+if _DEBUG and not _ONEDIR:
+    EXE_NAME = EXE_NAME + ' 调试版'
 
 # ---------- 与本项目无关的第三方包（禁止打进 bundle）----------
 # 打包环境的 Python 里装了很多其它项目的依赖（scipy/pandas/cryptography/
@@ -212,7 +220,7 @@ exe = EXE(
     # 拖慢冷启动；且 UPX 加壳的 exe 常被 Windows Defender 误报为可疑。
     # （实测开/关的 exe 体积与启动时间完全一致。）
     upx=False,
-    console=False,
+    console=_DEBUG,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

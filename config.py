@@ -8,7 +8,7 @@ import sys
 
 # ---------- 应用基本信息 ----------
 APP_NAME = "KnightModder 骑士模组师"
-APP_VERSION = "1.4.9"
+APP_VERSION = "1.4.10"
 
 # ---------- Steam 相关 ----------
 # 《空洞骑士》Steam AppID 与启动协议
@@ -38,6 +38,23 @@ UPDATE_CHECK_URL_RAW = f"{GH_RAW_BASE}/version.json"
 # 在线模组链接（ModLinksCN.xml）
 MODLINKS_URL_CDN = f"{GH_CDN_BASE}/ModLinksCN.xml"
 MODLINKS_URL_RAW = f"{GH_RAW_BASE}/ModLinksCN.xml"
+
+# Mod 链接的「多源容灾」清单：按顺序排列，load_from_url 逐一尝试、谁先成功用谁。
+#
+# 背景（踩坑）：国内大量用户网络下 jsDelivr 和 raw.githubusercontent.com 都被墙 /
+# 超时（本机实测 raw.githubusercontent.com 直接 12s 超时）。旧版只试这两个源，于是
+# 「更新链接」永远失败、报「Mod 链接加载失败」。下面额外挂了几个国内通常可达的
+# GitHub 镜像源兜底，能救回绝大多数用户。若要再加自己的镜像（最稳的是挂一个你自托管的
+# 国内可达地址，比如阿里云 OSS / Gitee Pages / 个人服务器），直接往这个列表里塞即可。
+MODLINKS_URLS = [
+    "https://fastly.jsdelivr.net/gh/mioshk/KnightModder@main/ModLinksCN.xml",   # Fastly 版 jsDelivr：国内常可达，优先
+    "https://gcore.jsdelivr.net/gh/mioshk/KnightModder@main/ModLinksCN.xml",    # Gcore 版 jsDelivr：另一组国内可达节点
+    f"{GH_CDN_BASE}/ModLinksCN.xml",                                  # jsDelivr 默认域名（cdn.jsdelivr.net）
+    f"{GH_RAW_BASE}/ModLinksCN.xml",                                  # GitHub raw
+    "https://raw.gitmirror.com/mioshk/KnightModder/main/ModLinksCN.xml",
+    "https://ghproxy.net/https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml",
+    "https://mirror.ghproxy.com/https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml",
+]
 
 # Markdown 文档（关于 / 使用教程）
 README_URL_CDN = f"{GH_CDN_BASE}/README.md"

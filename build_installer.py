@@ -73,6 +73,10 @@ def build_program_dir():
         shutil.rmtree(PROGRAM_DIR, ignore_errors=True)
     env = dict(os.environ)
     env["KM_ONEDIR"] = "1"
+    # 透传 KM_DEBUG：用它可构建「调试版」程序目录（开控制台 + 网络诊断日志），
+    # 配合 build_installer.py 直接产出带诊断能力的安装包，用于排查「Mod 链接加载失败」等。
+    if os.environ.get("KM_DEBUG"):
+        env["KM_DEBUG"] = os.environ["KM_DEBUG"]
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "main.spec"], env=env)
     if not os.path.isdir(PROGRAM_DIR):
         print("未找到构建产物目录：", PROGRAM_DIR)
