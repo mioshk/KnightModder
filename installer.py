@@ -465,6 +465,10 @@ def run_gui(version, payload):
     root.title(f"{APP_NAME} {version} 安装")
     root.resizable(False, False)
     root.configure(bg="#f5f5f5")
+    # 先收起再配置：tkinter 建窗后会先用「系统默认小尺寸」画一帧，再被
+    # geometry() 放大——那一帧就成了用户看到的"先弹个小框"。withdraw 让它在
+    # 设好尺寸、塞好内容之前完全不显示，彻底消掉这个闪烁。
+    root.withdraw()
 
     icon = resource_path("icon.ico")
     if os.path.isfile(icon):
@@ -474,11 +478,11 @@ def run_gui(version, payload):
             pass
 
     # 窗口居中
-    root.update_idletasks()
     w, h = 560, 460
     x = (root.winfo_screenwidth() // 2) - (w // 2)
     y = (root.winfo_screenheight() // 2) - (h // 2)
     root.geometry(f"{w}x{h}+{x}+{y}")
+    root.update_idletasks()
 
     # 默认沿用上一次的安装位置（没装过才是 %LOCALAPPDATA%\Programs\...）
     detected_dir = last_install_dir()
@@ -646,6 +650,7 @@ def run_gui(version, payload):
         root.destroy()
 
     show(page1)
+    root.deiconify()
     root.mainloop()
 
 
