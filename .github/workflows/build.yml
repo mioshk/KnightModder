@@ -77,10 +77,12 @@ jobs:
 
       # 只有打 v* 标签时才发 Release，免得每次 push 都生成一个发布版本。
       #
-      # 这里用 runner 自带的 GitHub CLI（gh），而不是 softprops/action-gh-release：
-      # 后者在附件文件名含空格时会多做一步「Restoring asset label」，去 PATCH
-      # /releases/assets/{id}，结果 404 Not Found 让整个 job 失败——而我们的 exe
-      # 恰恰就叫「KnightModder v1.4.5 绿色版.exe」这种带空格的名字。
+      # 附件名必须「无空格 + 纯 ASCII」：GitHub 的 assets 上传接口遇到带空格 /
+      # 中文的 name 会返回 404 Not Found——失败日志里就是
+      # uploads.github.com/repos/.../releases/<id>/assets?label=... 这种 404。
+      # 本地产物偏偏叫「KnightModder v1.4.10 绿色版.exe」（两个空格 + 中文），
+      # 所以无论用 softprops（PATCH /releases/assets/{id} 404）还是 gh（上传 404）
+      # 都会踩。这里先把两个 exe 复制成安全名字，再分两步「建 Release → 传附件」。
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -89,8 +91,22 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $j = Get-Content version.json -Raw | ConvertFrom-Json
-          $files = (Get-ChildItem dist -Filter *.exe).FullName
-          if (-not $files) { throw "dist 下没有找到 exe，无法发布 Release" }
+
+          # 复制成无空格、纯 ASCII 的附件名
+          $stage = Join-Path $env:RUNNER_TEMP "release-assets"
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          $install = Get-ChildItem dist -Filter "*安装版.exe" -File | Select-Object -First 1
+          $green   = Get-ChildItem dist -Filter "*绿色版.exe" -File | Select-Object -First 1
+          if (-not $install) { throw "缺少安装版 exe" }
+          if (-not $green)   { throw "缺少绿色版 exe" }
+
+          $setup    = Join-Path $stage "KnightModder-v$($j.version)-setup.exe"
+          $portable = Join-Path $stage "KnightModder-v$($j.version)-portable.exe"
+          Copy-Item $install.FullName $setup    -Force
+          Copy-Item $green.FullName   $portable -Force
+          $files = @($setup, $portable)
 
           # 同一个 tag 重跑时先清掉旧 Release。注意 GitHub 的 pwsh 会把
           # $ErrorActionPreference 设成 Stop，而 gh 在目标不存在时会返回非零
@@ -101,13 +117,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "删除旧 Release 失败" }
           }
 
+          # 第一步：只建 Release（不带附件）。比 create 时直接带附件稳——带附件
+          # 上传失败时 gh 会回滚重建，失败日志里 releases/<id> 一直变就是这么来的。
           # 刚推上来的 tag 在 GitHub 侧可能还没同步完（之前用 softprops 时日志里
           # 就出现过 "Release is not yet discoverable by tag"），gh 会报 tag not
           # found。所以失败后等几秒重试；若其实已经建好了（view 查得到）也算成功。
           $ok = $false
           for ($i = 1; $i -le 5; $i++) {
             gh release create $tag --title "KnightModder v$($j.version)" `
-              --notes "$($j.changelog)" $files
+              --notes "$($j.changelog)"
             if ($LASTEXITCODE -eq 0) { $ok = $true; break }
             gh release view $tag *> $null
             if ($LASTEXITCODE -eq 0) {
@@ -115,9 +133,13 @@ jobs:
               $ok = $true
               break
             }
-            Write-Host "第 $i 次发布未成功，5 秒后重试"
+            Write-Host "第 $i 次创建 Release 未成功，5 秒后重试"
             Start-Sleep -Seconds 5
           }
-          if (-not $ok) { throw "发布 Release 失败（已重试 5 次）" }
+          if (-not $ok) { throw "创建 Release 失败（已重试 5 次）" }
+
+          # 第二步：单独上传附件；--clobber 让同 tag 重跑能覆盖旧附件
+          gh release upload $tag $files --clobber
+          if ($LASTEXITCODE -ne 0) { throw "上传 Release 附件失败" }
 
           gh release view $tag
