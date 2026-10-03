@@ -19,8 +19,6 @@ from typing import List, Set, Dict, Optional, Callable
 from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, MODLINKS_URLS, MODLINKS_FRESH_URLS, STEAM_APPID, STEAM_RUN_URL, get_base_dir
 from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path, get_builtin_path
 from core.quark import QuarkClient, QuarkError
-# API 的下载地址不再写死在 config 里，统一从 api_manifest.json（线上清单）读取
-from core.api_manifest import get_package
 
 # 随软件内置的离线资源（打进 exe，无需联网/夸克下载）：
 #   - 1.5.78 原版 Assembly-CSharp.dll：还原 API 时直接覆盖回游戏目录
@@ -292,54 +290,20 @@ def _download_from_quark(link, dl_dir, pkg, platform_key, status_callback,
 
 
 def _resolve_api_package(status_callback, progress_callback):
-    """
-    取得 API 安装包，优先级：
-      ① 软件内置的离线包（assets/builtin/，已打进 exe）——无需联网、不走夸克网盘；
-      ② downloads/ 本地缓存；
-      ③ 否则按 api_manifest.json（GitHub 清单，兜底到程序自带 / 内置配置）里的
-         链接逐个尝试下载（夸克 / 直链），落盘到 downloads/ 供下次复用。
+    """取得 API 安装包：只使用软件内置的离线包（assets/builtin/，已打进 exe）。
 
-    正常情况下走 ①，用户完全不需要配置夸克账号、也不需要下载。
+    无需联网、不碰夸克网盘。该离线包随软件分发、离线可用；缺失即视为安装损坏。
     :return: 本地 zip 路径
     """
-    # ① 内置离线包优先：软件自带，不联网、不碰夸克网盘
+    # 只走软件内置包，不再依赖外部清单 / 网盘下载。
     builtin_pkg = get_builtin_path(BUILTIN_API_ZIP)
     if builtin_pkg and os.path.isfile(builtin_pkg) and zipfile.is_zipfile(builtin_pkg):
-        status_callback(f"使用内置的 Modding API 安装包（离线）", "info")
+        status_callback("使用内置的 Modding API 安装包（离线）", "info")
         return builtin_pkg
-
-    system = get_system_type()
-    pkg = get_package(system, status_callback=status_callback)
-    if pkg is None:
-        raise RuntimeError(f"API 清单里没有 {system} 的安装包配置")
-
-    dl_dir = get_download_dir()
-    os.makedirs(dl_dir, exist_ok=True)
-    local_path = os.path.join(dl_dir, pkg.file_name)
-
-    # ② 本地缓存优先：命中则直接复用，无需联网
-    if os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
-        status_callback(f"使用本地缓存的 API 安装包：{pkg.file_name}", "info")
-        return local_path
-
-    if not pkg.all_links:
-        raise RuntimeError(f"API 清单里没有配置 {system} 的下载链接")
-
-    platform_key = {"Windows": "windows"}[system]
-    errors = []
-    for link in pkg.all_links:
-        try:
-            # 直链优先（all_links 已排好序），网盘链接走夸克
-            if "pan.quark.cn" in link.lower():
-                return _download_from_quark(link, dl_dir, pkg, platform_key,
-                                            status_callback, progress_callback)
-            return _download_direct(link, local_path, pkg,
-                                    status_callback, progress_callback)
-        except Exception as e:  # noqa: BLE001 一个链接不行就换下一个
-            errors.append(f"{link} → {e}")
-            status_callback(f"⚠️ 该链接不可用，尝试下一个：{e}", "warn")
-
-    raise RuntimeError("API 所有下载链接均不可用：" + "；".join(errors))
+    raise RuntimeError(
+        "未找到软件内置的 Modding API 安装包（assets/builtin/"
+        f"{BUILTIN_API_ZIP}）。请确认本程序安装完整，或重新下载安装本程序。"
+    )
 
 
 # API 安装与还原共用一把锁：两者操作的是同一份 Assembly-CSharp.dll（安装把内置

@@ -10,7 +10,6 @@ import sys
 
 from config import (
     CONFIG_FILE,
-    API_ZIP_MAP,
     STEAM_APPID, DOWNLOAD_DIR_NAME,
     get_base_dir,
 )
