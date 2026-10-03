@@ -14,20 +14,6 @@
     <TagsCN>辅助; 玩法</TagsCN>
     <Integrations />
   </Mod>
-    <Mod>
-    <Name>BetterParrying</Name>
-    <NameCN>test测试</NameCN>
-    <Description>Simplifies the game's parrying mechanics.</Description>
-    <DescriptionCN>简化了游戏的格挡机制。</DescriptionCN>
-    <Version>1.0.0.0</Version>
-    <Repository>https://github.com/user500050/HKBetterParrying</Repository>
-    <SHA256>535f917d2faff5dafd81abed23857a95761c143bc465722974623453759bf6c8</SHA256>
-    <QLink>https://pan.quark.cn/s/e03591af8921</QLink>
-    <QLinks>https://pan.quark.cn/s/e03591af8921</QLinks>
-    <AllDependencies />
-    <TagsCN>辅助; 玩法</TagsCN>
-    <Integrations />
-  </Mod>
   <Mod>
     <Name>MidAirHealing</Name>
     <NameCN>空中治疗</NameCN>
