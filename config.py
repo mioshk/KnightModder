@@ -56,6 +56,17 @@ MODLINKS_URLS = [
     "https://mirror.ghproxy.com/https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml",
 ]
 
+# 手动「更新链接」优先走、不经过 CDN 缓存的「实时源」：直接反代 GitHub raw，推完即最新。
+# 背景（实测踩坑）：jsDelivr 的 shield 层缓存按「仓库+路径」存，query 戳只打穿 edge、
+# shield 仍吐旧副本（同 etag），所以给 jsDelivr 加 ?_= 时间戳并不能即时刷新；而 ghproxy /
+# gitmirror 这类反代源实时代理 raw.githubusercontent，etag 随 GitHub 最新提交变化。
+# 手动刷新就用这份列表（ghproxy 优先，因为它在多数被墙网络下仍可通），拿不到再退回上面的 CDN 列表。
+MODLINKS_FRESH_URLS = [
+    "https://ghproxy.net/https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/ModLinksCN.xml",
+    f"{GH_RAW_BASE}/ModLinksCN.xml",
+    "https://raw.gitmirror.com/mioshk/KnightModder/main/ModLinksCN.xml",
+]
+
 # Markdown 文档（关于 / 使用教程）
 README_URL_CDN = f"{GH_CDN_BASE}/README.md"
 README_URL_RAW = f"{GH_RAW_BASE}/README.md"

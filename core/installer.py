@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from typing import List, Set, Dict, Optional, Callable
 
-from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, MODLINKS_URLS, STEAM_APPID, STEAM_RUN_URL, get_base_dir
+from config import MODLINKS_URL_CDN, MODLINKS_URL_RAW, MODLINKS_URLS, MODLINKS_FRESH_URLS, STEAM_APPID, STEAM_RUN_URL, get_base_dir
 from utils.common import get_game_exe_path, get_managed_dir, get_mods_dir, get_download_dir, load_quark_cookie, get_system_type, safe_requests_get, fetch_remote_content, is_steam_official_path, get_builtin_path
 from core.quark import QuarkClient, QuarkError
 # API 的下载地址不再写死在 config 里，统一从 api_manifest.json（线上清单）读取
@@ -762,6 +762,9 @@ class DependencyResolver:
         self.is_loaded = False
         self.mod_data = []
         self.mod_data_by_name = {}
+        # 上次 load_from_url 是否真拿到了「与本地缓存不同的新内容」。
+        # False 表示线上未变化（304 或内容哈希一致），调用方可据此跳过 UI 重建。
+        self._last_fetch_changed = True
 
     # ---------- 本地缓存（避免每次启动都等网络） ----------
     @staticmethod
@@ -796,7 +799,41 @@ class DependencyResolver:
         except OSError:
             return False
 
-    def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None) -> bool:
+    # ---------- 「未变化则跳过」所需的缓存指纹 ----------
+    def _cache_sha256(self) -> Optional[str]:
+        """本地缓存 XML 的 sha256（用于「内容未变化则跳过解析」）。无缓存返回 None。"""
+        try:
+            p = self._cache_file()
+            if not os.path.isfile(p):
+                return None
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(65536), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+        except OSError:
+            return None
+
+    def _etag_file(self) -> str:
+        return os.path.join(os.path.dirname(self._cache_file()), "ModLinksCN.etag.json")
+
+    def _load_etags(self) -> Dict[str, str]:
+        """各源上次成功返回的 ETag（用于 If-None-Match 条件请求，命中 304 即不下载）。"""
+        try:
+            with open(self._etag_file(), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_etags(self, etags: Dict[str, str]) -> None:
+        try:
+            with open(self._etag_file(), "w", encoding="utf-8") as f:
+                json.dump(etags, f)
+        except OSError:
+            pass
+
+    def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None,
+                      bust_cache: bool = False) -> bool:
         """
         从 URL 加载 Mod 依赖数据。
 
@@ -807,22 +844,46 @@ class DependencyResolver:
 
         :param url: 自定义单源地址（仍支持，但 UI 暂未暴露）；默认用多源列表
         :param progress_callback: 进度回调函数
+        :param bust_cache: 是否强制取 GitHub 最新版（手动「更新链接」用）。True 时把
+            MODLINKS_FRESH_URLS（ghproxy / raw / gitmirror 等直接反代 GitHub raw、不经 CDN
+            缓存的实时源）排到最前，先试这些实时源、拿不到再退回 jsDelivr 等 CDN 缓存源兜底。
+            注意：给 jsDelivr 加 ?_= 时间戳打不穿它的 shield 缓存（实测同 etag），所以必须用
+            实时源而非戳。自动加载 / 后台刷新保持 False，照常享受 CDN 加速、不刷爆 GitHub。
         :return: 是否加载成功
         """
         from utils.common import net_debug_log
-        sources = [url] if url else MODLINKS_URLS
+        if url:
+            sources = [url]
+        elif bust_cache:
+            # 手动刷新要最新：实时源（反代 raw，无 CDN 缓存）优先，CDN 源兜底。
+            _fresh = list(MODLINKS_FRESH_URLS)
+            _rest = [u for u in MODLINKS_URLS if u not in _fresh]
+            sources = _fresh + _rest
+        else:
+            sources = list(MODLINKS_URLS)
         first_net_err = None
         last_err = None
+        _cached_sha = self._cache_sha256()
+        _etags = self._load_etags()
+        self._last_fetch_changed = True
         for u in sources:
+            headers = {}
+            if u in _etags:
+                headers["If-None-Match"] = _etags[u]
             try:
                 if progress_callback:
                     progress_callback(f"🔍 正在从 {_short_host(u)} 获取 Mod 数据...", "info")
                 net_debug_log(f"[ModLinks] 尝试 {u}")
                 response = safe_requests_get(
-                    u, timeout=15,
+                    u, timeout=15, headers=headers,
                     ssl_warn_callback=lambda msg: progress_callback(msg, "warning") if progress_callback else None
                 )
                 response.raise_for_status()
+                if response.status_code == 304:
+                    # 服务端确认未变更（本地缓存即最新）：不下载、不解析、不重建 UI
+                    net_debug_log(f"[ModLinks] 304 未变更，使用本地缓存 {u}")
+                    self._last_fetch_changed = False
+                    return True
                 content = response.content
                 net_debug_log(f"[ModLinks] 成功 {u} ({len(content)} 字节)")
             except Exception as e:  # noqa: BLE001 单个源失败不致命，换下一个
@@ -832,11 +893,26 @@ class DependencyResolver:
                 last_err = e
                 continue
 
+            # 内容哈希与本地缓存一致 → 线上未变化：跳过昂贵的 XML 解析与 UI 重建
+            if _cached_sha is not None and hashlib.sha256(content).hexdigest() == _cached_sha:
+                net_debug_log(f"[ModLinks] 内容未变化，跳过解析 {u}")
+                _etag = response.headers.get("ETag")
+                if _etag:
+                    _etags[u] = _etag
+                    self._save_etags(_etags)
+                self._last_fetch_changed = False
+                return True
+
             if progress_callback:
                 progress_callback("📥 正在解析 Mod 数据...", "info")
             if self._parse_xml_content(content, progress_callback):
                 # 解析成功后才写入本地缓存，避免坏数据覆盖缓存
                 self.save_cache(content)
+                _etag = response.headers.get("ETag")
+                if _etag:
+                    _etags[u] = _etag
+                    self._save_etags(_etags)
+                self._last_fetch_changed = True
                 return True
             net_debug_log(f"[ModLinks] 解析失败 {u}")
             last_err = RuntimeError("数据解析失败（文件内容异常）")

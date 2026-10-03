@@ -1797,16 +1797,24 @@ class MainWindow(QMainWindow):
         self.dependency_done.emit(success)
 
     def _refresh_dependency_task(self):
-        """后台刷新 Mod 数据，成功则通知 UI 更新（失败保留缓存）"""
+        """后台刷新 Mod 数据，成功则通知 UI 更新（失败保留缓存）。
+
+        用 bust_cache=True 走实时源：否则后台刷新会打 fastly 等 CDN 缓存源、拿到旧数据
+        又把本地缓存覆盖回去，导致「手动更新拿到最新 → 重启又被 CDN 旧数据打回」的倒退。
+        """
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(progress_callback=self._log)
+                success = self.resolver.load_from_url(progress_callback=self._log, bust_cache=True)
         except Exception as e:
             self._log(f"后台刷新 Mod 数据异常: {e}", "error")
             success = False
         if success:
-            self._log("✅ 后台刷新完成，Mod 数据已是最新", "success")
-            self.dependency_done.emit(True)
+            if self.resolver._last_fetch_changed:
+                self._log("✅ 后台刷新完成，Mod 数据已是最新", "success")
+                self.dependency_done.emit(True)
+            else:
+                # 线上与本地缓存一致：不重建 UI，直接复用缓存（更快）
+                self._log("✅ Mod 数据已是最新（与本地缓存一致，无需更新）", "info")
 
     def _on_load_finished(self, success):
         try:
@@ -1830,10 +1838,10 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._reload_dependency_task, daemon=True).start()
 
     def _reload_dependency_task(self):
-        """手动刷新任务：必须走网络，忽略本地缓存"""
+        """手动刷新任务：必须走网络，忽略本地缓存；并击穿 CDN 缓存拿最新数据"""
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(progress_callback=self._log)
+                success = self.resolver.load_from_url(progress_callback=self._log, bust_cache=True)
         except Exception as e:
             self._log(f"Mod链接加载异常: {e}", "error")
             success = False
