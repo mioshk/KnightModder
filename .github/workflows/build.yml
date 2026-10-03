@@ -48,9 +48,13 @@ jobs:
       - name: 构建安装版
         run: python build_installer.py
 
-      - name: 列出产物
+      - name: 校验产物（安装版 + 绿色版必须都在）
         shell: pwsh
         run: |
+          $install = Get-ChildItem dist -Filter "KnightModder v* 安装版.exe" -File
+          $green   = Get-ChildItem dist -Filter "KnightModder v* 绿色版.exe" -File
+          if (-not $install) { throw "缺少安装版 exe：dist/KnightModder v* 安装版.exe" }
+          if (-not $green)   { throw "缺少绿色版 exe：dist/KnightModder v* 绿色版.exe" }
           Get-ChildItem dist -Filter *.exe |
             ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length/1MB) }
 
