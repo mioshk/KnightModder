@@ -120,9 +120,19 @@ def build_installer():
         print("\n未找到安装器产物")
 
 
+def cleanup():
+    step(f"清理中间产物: {PROGRAM_DIR}")
+    if os.path.isdir(PROGRAM_DIR):
+        shutil.rmtree(PROGRAM_DIR, ignore_errors=True)
+        print(f"  已删除 {PROGRAM_DIR}")
+    else:
+        print("  无需清理")
+
+
 if __name__ == "__main__":
     t0 = time.time()
     build_program_dir()
     make_payload()
     build_installer()
+    cleanup()
     print(f"\n全部完成，总用时 {time.time()-t0:.1f}s")

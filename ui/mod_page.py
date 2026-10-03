@@ -43,7 +43,8 @@ from PySide6.QtWidgets import (
     QTextBrowser,
 )
 from PySide6.QtGui import (QFont, QCursor, QPixmap, QPainter, QDesktopServices,
-                           QTextCursor, QImage, QColor, QTextDocument)
+                           QTextCursor, QImage, QColor, QTextDocument, QLinearGradient,
+                           QPen)
 from urllib.parse import urljoin, quote
 from utils import get_mods_dir
 from core import disable_mod, enable_mod, delete_mod, is_mod_enabled
@@ -1017,24 +1018,60 @@ def _github_owner_repo(url):
     return f"{owner}/{repo}" if owner and repo else ""
 
 
+def _race_readme(tasks, budget):
+    """并发竞速取 README：谁先成功谁胜出，全部失败返回 None。
+
+    用 daemon 线程同时发所有候选，拿到结果立即返回、不等慢任务；
+    若所有候选都失败，由最后一个结束的线程投 None 哨兵，立即收工（不等满预算）。
+    """
+    import threading
+    import queue as _queue
+    if not tasks:
+        return None
+    result_q = _queue.Queue()
+    _lock = threading.Lock()
+    _state = {"done": 0}
+
+    def _worker(fn):
+        try:
+            res = fn()
+        except Exception:
+            res = None
+        if res:
+            result_q.put(res)
+        with _lock:
+            _state["done"] += 1
+            if _state["done"] == len(tasks):
+                result_q.put(None)  # 全部结束且无人成功的哨兵
+
+    for fn in tasks:
+        threading.Thread(target=_worker, args=(fn,), daemon=True).start()
+    try:
+        return result_q.get(timeout=budget)
+    except _queue.Empty:
+        return None
+
+
 def fetch_readme(repo_url, timeout=6, total_budget=30, ssl_warn_callback=None):
     """
     拉取 Mod 仓库的 README（任意大小写 / 子目录均可），返回 (markdown 原文, base_url)。
 
-    为什么是「并发竞速」而不是「串行逐个试」：
-      能直连的 CDN 只有 jsDelivr，且它对文件名大小写敏感，没法真正「忽略大小写」；
-      而国内直连每个请求可能 3~9s、连 404 都要等满超时。若串行逐个试，几个请求就能把
-      预算耗光——既慢又容易失败。所以改为把所有候选**同时**发出去，谁先成功用谁，
-      总耗时≈最快那个响应（走系统代理时通常 1~3s）。
+    与 ModLinks 的 load_from_url 走**完全相同的源策略**：实时源优先、jsDelivr 兜底。
+      - 第一阶段：只试实时源（ghproxy → raw → gitmirror，直接反代 GitHub raw、
+        不经 CDN 缓存，作者推完即最新），名字为标准 README.md / readme.md；
+      - 第二阶段（仅第一阶段全部失败才进）：实时源「大小写变体扫」。raw 对路径大小写
+        敏感，ReadMe.md / Readme.MD 这类写法用标准名一律 404；此阶段用 HEAD 引用逐名
+        枚举常见写法，在被墙网络下也能兜住混合大小写；
+      - 第三阶段（再失败才进）：jsDelivr 兜底。jsDelivr 有 GitHub 缓存，可能返回偏旧
+        副本，只作为「至少能拉到一份」的最后手段；同时用它的清单 API 大小写不敏感地
+        定位 docs/README.md 等带子目录的稀有写法。
 
-    并发候选（取第一个成功）：
-      - cdn.jsdelivr.net 的 README.md / readme.md：覆盖绝大多数仓库，最快；
-      - jsDelivr 清单 API（data.jsdelivr.com）在 main / master 分支上大小写不敏感地
-        定位真实文件名，覆盖 ReadMe.md / readme.md / docs/README.md 等稀有写法；
-      - raw.githubusercontent.com：仅对开了代理/VPN 的用户有效。
-    total_budget 限制总等待时间，避免极端网络下拖住界面。
+    各阶段均「并发竞速」：同阶段内候选同时发出，谁先成功用谁，总耗时≈最快那个响应。
+    total_budget 为单阶段等待上限，避免极端网络下拖住界面。
 
-    base_url 为 README 所在目录，用于解析其中的相对图片/链接。
+    base_url：实时源命中时固定返回 jsDelivr 仓库目录（不取命中源目录）。原因：base_url
+    用于解析 README 里的相对图片/链接，而图片是静态资源、不需要实时——jsDelivr 国内可稳定
+    提供仓库文件（含图片二进制），ghproxy/raw 拉图片常失败。取命中源目录会导致图片全裂。
     """
     owner_repo = _github_owner_repo(repo_url)
     fallback_base = f"https://cdn.jsdelivr.net/gh/{owner_repo}/" if owner_repo else ""
@@ -1075,46 +1112,67 @@ def fetch_readme(repo_url, timeout=6, total_budget=30, ssl_warn_callback=None):
             return None
         return _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/{fn}")
 
-    tasks = [
+    # ---- 第一阶段：实时源（直接反代 GitHub raw，不经 CDN 缓存）----
+    # 覆盖：标准名 README.md/readme.md + 常见混合大小写（ReadMe.md 等）× 分支 main/master
+    # × 源 ghproxy/gitmirror（混合名额外试 raw）。同阶段并发竞速，谁先成功用谁；对墙内网络，
+    # 只要「可达的那个源」命中（gitmirror 或 ghproxy）立即返回，不会傻等被墙源的 DNS 超时
+    # （DNS 超时不受 requests 的 timeout 约束，单押被墙源会挂 10~30s）。
+    # 之前 ReadMe.md 这类混合名只放在 HEAD 阶段，而 gitmirror 未必支持 HEAD、ghproxy 一旦
+    # 被墙就整段干等 —— 这正是 BenchDeploy 加载慢的根因。现直接并入 main/master 显式分支。
+    # GitHub raw 对路径大小写敏感：readme 六字母 + 扩展名的大小写任意组合都可能（ReadMe.md /
+    # README.MD / Readme.MD …），这里枚举现实里会出现的全部常见组合，确保「有 README 就能命中」。
+    _readme_names = [
+        "README.md", "readme.md",                 # 绝大多数仓库用这两个
+        "Readme.md", "ReadMe.md",                 # 最常见的两种混合写法
+        "README.MD", "readme.MD", "Readme.MD", "ReadMe.MD",   # 扩展名大写
+        "ReadME.md", "READme.md", "READMe.md", "REAdme.md", "readME.md",  # 更多混合
+        "README.markdown", "readme.markdown", "Readme.markdown", "ReadMe.markdown",
+    ]
+    _fresh = []
+    for branch in ("main", "master"):
+        for name in _readme_names:
+            # ghproxy：墙内常见可达源，实测支持 HEAD 引用
+            _fresh.append(lambda b=branch, n=name: _get(
+                f"https://ghproxy.net/https://raw.githubusercontent.com/{owner_repo}/{b}/{n}"))
+            # gitmirror：另一可达源，与 ghproxy 互补（一台机器通常至少一个通）
+            _fresh.append(lambda b=branch, n=name: _get(
+                f"https://raw.gitmirror.com/{owner_repo}/{b}/{n}"))
+            # raw（原 GitHub）：仅标准名试，墙内常 DNS 挂很久，不值得为混合名等
+            if name in ("README.md", "readme.md"):
+                _fresh.append(lambda b=branch, n=name: _get(
+                    f"https://raw.githubusercontent.com/{owner_repo}/{b}/{n}"))
+    # HEAD 引用兜底：覆盖默认分支非 main/master 的仓库（ghproxy 实测支持 HEAD）
+    for name in ("README.md", "readme.md", "ReadMe.md", "Readme.md"):
+        _fresh.append(lambda n=name: _get(
+            f"https://ghproxy.net/https://raw.githubusercontent.com/{owner_repo}/HEAD/{n}"))
+        _fresh.append(lambda n=name: _get(
+            f"https://raw.gitmirror.com/{owner_repo}/HEAD/{n}"))
+
+    # ---- 第二阶段：jsDelivr 兜底（有 GitHub 缓存，可能偏旧；仅实时源全挂才用）----
+    _jsd = [
         lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/README.md"),
         lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/readme.md"),
         lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/Readme.md"),
         lambda: _get(f"https://cdn.jsdelivr.net/gh/{owner_repo}/ReadMe.md"),
         lambda: _via_list_api("main"),
         lambda: _via_list_api("master"),
-        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/HEAD/README.md"),
-        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/main/README.md"),
-        lambda: _get(f"https://raw.githubusercontent.com/{owner_repo}/master/README.md"),
     ]
 
-    # 并发竞速：谁先成功谁胜出。用 daemon 线程，拿到结果立即返回，不等慢任务；
-    # 若所有候选都失败，则由最后一个结束的线程投一个 None 哨兵，立即收工（不等满预算）。
-    import threading
-    import queue as _queue
-    result_q = _queue.Queue()
-    _lock = threading.Lock()
-    _state = {"done": 0}
-
-    def _worker(fn):
-        try:
-            res = fn()
-        except Exception:
-            res = None
-        if res:
-            result_q.put(res)
-        with _lock:
-            _state["done"] += 1
-            if _state["done"] == len(tasks):
-                result_q.put(None)  # 全部结束且无人成功的哨兵
-
-    for fn in tasks:
-        threading.Thread(target=_worker, args=(fn,), daemon=True).start()
-
-    try:
-        res = result_q.get(timeout=total_budget)
-    except _queue.Empty:
-        return "", fallback_base
-    return res if res else ("", fallback_base)
+    res = _race_readme(_fresh, total_budget)
+    if res:
+        # 正文走高实时源（实时源优先），但 base_url 仍固定用 jsDelivr 仓库目录：
+        # README 里的相对图片/链接按它解析。jsDelivr 国内可稳定提供仓库文件（含图片
+        # 二进制），而 ghproxy / raw 拉图片常失败——若 base 跟着实时源走，就会出现
+        # 「正文能显示、图片全裂」。图片只是静态资源，不需要实时，交给 jsDelivr 最稳。
+        # 第三个返回值 src_hint = 命中源目录：告诉图片下载「优先复用刚成功的这个源」，
+        # 同源最稳、不浪费被墙源的 DNS 超时。
+        return res[0], fallback_base, res[1]
+    # 第二阶段：jsDelivr 兜底（大小写不敏感 + 清单 API；仅实时源全挂才用）
+    res = _race_readme(_jsd, min(total_budget, 10))
+    if res:
+        # jsDelivr 兜底阶段：base 命中目录即 jsDelivr 目录，src_hint 同。
+        return res[0], res[1], res[1]
+    return "", fallback_base, ""
 
 
 def _find_readme_in_tree(nodes):
@@ -1279,7 +1337,83 @@ def _download_image(url, timeout=10, ssl_warn_callback=None):
         return None
 
 
-def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None, on_each=None):
+def _source_tag_of(url):
+    """从 URL 判断它属于哪个源：jsdelivr / ghproxy / gitmirror / raw，其余返回 None。"""
+    if not url:
+        return None
+    if "cdn.jsdelivr.net" in url:
+        return "jsdelivr"
+    if "ghproxy.net" in url:
+        return "ghproxy"
+    if "raw.gitmirror.com" in url:
+        return "gitmirror"
+    if "raw.githubusercontent.com" in url:
+        return "raw"
+    return None
+
+
+def _img_candidates(url, repo_url, preferred=None):
+    """一张 README 图片的多源候选（按优先级）。
+
+    与 README 正文统一：国内网络千差万别，jsDelivr 对一部分用户被墙、ghproxy 对另一部分
+    被墙，所以**单押一个源必有人裂图**。这里逐源试，谁先成功用谁。
+
+    关键约定：列表里「存盘用的 key」始终等于传入的原始 url（jsDelivr 地址）。因为 Qt 用
+    document 的 baseUrl 把 <img src> 解析成 jsDelivr 绝对地址、loadResource 也按它查缓存——
+    所以「从哪个源下载」和「按哪个 key 存」必须分开：下载可走任意可达源，但必须存到原始
+    （jsDelivr）url 这个 key 下，渲染时才能对上。
+
+    preferred：优先复用「刚成功拉到 README 正文」的那个源（同源最稳，避免先去撞被墙源的
+    长 DNS 超时）。取值为 _source_tag_of 的结果；None 则按默认顺序。
+    """
+    # 非 jsDelivr 地址（catbox 等境外图床外链）：保留原逻辑（直连 + wsrv 代理）
+    if "cdn.jsdelivr.net/gh/" not in url:
+        return [url, _proxy_url(url)]
+    m = re.search(r"cdn\.jsdelivr\.net/gh/([^/]+/[^/]+)/(.*)$", url)
+    if not m:
+        return [url, _proxy_url(url)]
+    owner_repo, path = m.group(1), m.group(2).split("?")[0].split("#")[0]
+
+    def _gh(b):
+        return f"https://ghproxy.net/https://raw.githubusercontent.com/{owner_repo}/{b}/{path}"
+
+    def _raw(b):
+        return f"https://raw.githubusercontent.com/{owner_repo}/{b}/{path}"
+
+    def _gm(b):
+        return f"https://raw.gitmirror.com/{owner_repo}/{b}/{path}"
+
+    # 各源直连候选（main/master）
+    direct = {
+        "jsdelivr": [url],
+        "ghproxy": [_gh("main"), _gh("master")],
+        "raw": [_raw("main"), _raw("master")],
+        "gitmirror": [_gm("main"), _gm("master")],
+    }
+    # 代理兜底（只代 jsDelivr 与 raw，避免对 ghproxy 套娃代理导致 URL 过长 / 解析异常）
+    proxied = {
+        "jsdelivr": [_proxy_url(url)],
+        "raw": [_proxy_url(_raw("main")), _proxy_url(_raw("master"))],
+    }
+
+    # 顺序：preferred 最前，其余直连源随后，代理兜底压最后
+    order = [preferred] if preferred in direct else []
+    for tag in ("ghproxy", "gitmirror", "raw", "jsdelivr"):
+        if tag != preferred:
+            order.append(tag)
+    cands = []
+    for tag in order:
+        cands.extend(direct[tag])
+    if preferred in proxied:
+        cands.extend(proxied[preferred])
+    for tag in ("raw", "jsdelivr"):
+        if tag != preferred:
+            cands.extend(proxied[tag])
+    return cands
+
+
+def fetch_readme_images(urls, repo_url=None, preferred_source=None,
+                        timeout=10, ssl_warn_callback=None, on_each=None, max_workers=6):
     """
     预下载 README 里的**原图**，返回 {url: QImage}（失败的跳过，不影响正文）。
 
@@ -1288,10 +1422,12 @@ def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None, on_each=None):
     乱码区域。改为渲染前把图备好，交给 _ReadmeBrowser 从缓存直接取，
     既修好显示，也避免在绘制过程中联网卡住界面。
 
-    这里保留原图不缩放：内联显示时的缩窄由 _ReadmeBrowser 懒处理，
-    点击图片预览时才能看到真正的原始尺寸。
+    每张图按 _img_candidates 给的多源顺序逐个试、谁先成功用谁（与正文同源容灾）；
+    key 一律用传入的原始（jsDelivr）url，才能和 <img src> / loadResource 对上。
+    多张图用线程池**并发**下载，图多也不串行干等；每下好一张就 on_each 回调一次，
+    实现「下好一张显示一张」的增量渲染。
 
-    on_each(key, qimage)：每下好一张就回调一次，便于「下好一张显示一张」的增量渲染。
+    preferred_source：优先复用刚成功拉到 README 正文的源（同源最稳、绕开被墙源的长 DNS 超时）。
     """
     result = {}
     if not urls:
@@ -1300,16 +1436,25 @@ def fetch_readme_images(urls, timeout=10, ssl_warn_callback=None, on_each=None):
         from utils.common import safe_requests_get      # noqa: F401  探测依赖可用
     except Exception:
         return result
-    for u in urls:
-        img = _download_image(u, timeout, ssl_warn_callback)
-        if img is None:
-            # 直连失败（多为境外图床被重置）时经公共图片代理重取。
-            # 结果仍以**原图 URL** 为 key，才能和 <img src> 对上。
-            img = _download_image(_proxy_url(u), timeout, ssl_warn_callback)
+    import threading
+    import concurrent.futures as _cf
+    _lock = threading.Lock()
+
+    def _do(u):
+        img = None
+        for c in _img_candidates(u, repo_url, preferred_source):
+            img = _download_image(c, timeout, ssl_warn_callback)
+            if img is not None:
+                break
         if img is not None:
-            result[u] = img
+            with _lock:
+                result[u] = img   # key 用原始（jsDelivr）url，渲染时才能对上
             if on_each is not None:
                 on_each(u, img)
+
+    n = max(1, min(max_workers, len(urls)))
+    with _cf.ThreadPoolExecutor(max_workers=n) as ex:
+        list(ex.map(_do, urls))
     return result
 
 
@@ -1442,8 +1587,9 @@ class _ReadmeBrowser(MarkdownBrowser):
     _PLACEHOLDER_CACHE = {}
 
     def _make_placeholder(self):
-        """图片还没下载好时用的占位图：灰底 + 居中提示，按视口宽度预留空间。
+        """图片还没下载好时用的占位图：柔和渐变 + 图片图标 + 提示，按视口宽度预留固定空间。
 
+        占位保持固定尺寸（16:9，宽≤480），避免布局抖动；这里只让它加载途中更好看。
         缓存按（显示宽度, DPR）失效；窗口缩放或换屏后会自动重出。
         """
         dpr = self.devicePixelRatioF() or 1.0
@@ -1453,18 +1599,66 @@ class _ReadmeBrowser(MarkdownBrowser):
         cached = _ReadmeBrowser._PLACEHOLDER_CACHE.get(cache_key)
         if cached is not None:
             return cached
+
         px = max(1, int(round(w * dpr)))
         py = max(1, int(round(h * dpr)))
         img = QImage(px, py, QImage.Format_ARGB32)
-        img.fill(QColor("#23232b"))
+        img.fill(Qt.transparent)
+
         p = QPainter(img)
-        p.setPen(QColor("#3a3a44"))
-        p.drawRect(0, 0, px - 1, py - 1)
-        p.setPen(QColor("#8a8a99"))
+        p.setRenderHint(QPainter.Antialiasing)
+
+        pad = max(3, int(round(px * 0.025)))
+        outer = img.rect().adjusted(pad, pad, -pad, -pad)
+        r = max(8, int(px * 0.045))
+
+        # 圆角渐变底（深空灰 → 略亮），配 1px 细描边
+        grad = QLinearGradient(0, outer.top(), 0, outer.bottom())
+        grad.setColorAt(0.0, QColor("#20202a"))
+        grad.setColorAt(1.0, QColor("#2a2a35"))
+        p.setBrush(grad)
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(outer, r, r)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor("#33333e"), max(1, int(px * 0.004))))
+        p.drawRoundedRect(outer, r, r)
+        # 顶部内高光：一层极淡的白线，让卡片有「玻璃」质感
+        p.setPen(QPen(QColor(255, 255, 255, 20), max(1, int(px * 0.004))))
+        p.drawLine(outer.left() + r, outer.top() + 1, outer.right() - r, outer.top() + 1)
+
+        # ---- 卡片内居中的「图标 + 文字」整体 ----
+        text_px = max(10, int(px * 0.036))
+        icon = min(float(outer.width()), float(outer.height())) * 0.22
+        gap = int(icon * 0.34)
+        group_h = int(icon) + gap + text_px
+        top = outer.top() + (outer.height() - group_h) / 2.0
+        cx = px / 2.0
+
+        ix, iy = int(cx - icon / 2), int(top)
+        iw, ih = int(icon), int(icon)
+        ico = QColor("#6b7990")
+        p.setPen(QPen(ico, max(1, int(px * 0.006))))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(ix, iy, iw, ih, iw * 0.16, ih * 0.16)
+        p.setBrush(ico)
+        p.setPen(Qt.NoPen)
+        sun = max(2, int(iw * 0.15))
+        p.drawEllipse(int(ix + iw * 0.58), int(iy + iw * 0.17), sun, sun)
+        p.drawPolygon([
+            QPoint(int(ix + iw * 0.16), int(iy + iw * 0.82)),
+            QPoint(int(ix + iw * 0.42), int(iy + iw * 0.48)),
+            QPoint(int(ix + iw * 0.60), int(iy + iw * 0.66)),
+            QPoint(int(ix + iw * 0.80), int(iy + iw * 0.38)),
+            QPoint(int(ix + iw * 0.80), int(iy + iw * 0.82)),
+        ])
+
+        # 文字紧贴图标下方，留在卡片内部
+        p.setPen(QColor("#9a9aa6"))
         f = QFont("Microsoft YaHei")
-        f.setPixelSize(max(11, int(px * 0.045)))
+        f.setPixelSize(text_px)
         p.setFont(f)
-        p.drawText(img.rect(), Qt.AlignCenter, "🖼 图片加载中…")
+        p.drawText(0, iy + ih + gap, px, int(text_px * 1.5),
+                   Qt.AlignHCenter | Qt.AlignTop, "图片加载中…")
         p.end()
         img.setDevicePixelRatio(dpr)
         _ReadmeBrowser._PLACEHOLDER_CACHE[cache_key] = img
@@ -1541,6 +1735,30 @@ class _ReadmeBrowser(MarkdownBrowser):
                 return
         super().mouseReleaseEvent(e)
 
+    def contextMenuEvent(self, e):
+        """在图片上右键给「针对图片」的菜单；其它位置走标准菜单（复制文字/全选等）。
+
+        标准菜单的「复制」「复制链接地址」是给文字/锚链接用的——图片两者都不是，
+        点上去没反应。这里命中图片就换成能用的项：复制图片、复制图片链接、查看大图。
+        """
+        pos = self.viewport().mapFromGlobal(e.globalPos())
+        url = self._image_at(pos)
+        if url:
+            menu = QMenu(self)
+            clip = QApplication.clipboard()
+            act_link = menu.addAction("复制图片链接")
+            act_link.triggered.connect(lambda: clip.setText(url))
+            img = self._images.get(url)
+            if img is not None and not img.isNull():
+                act_copy = menu.addAction("复制图片")
+                act_copy.triggered.connect(lambda: clip.setImage(img))
+                act_preview = menu.addAction("查看大图")
+                act_preview.triggered.connect(lambda: show_image_preview(self, img))
+            menu.exec(e.globalPos())
+            e.accept()
+            return
+        super().contextMenuEvent(e)
+
 
 class _ReadmeWorker(QThread):
     """后台拉取 README 及其配图：网络请求不能卡住 UI 主线程。
@@ -1559,7 +1777,7 @@ class _ReadmeWorker(QThread):
 
     def run(self):
         try:
-            text, base = fetch_readme(self.repo_url)
+            text, base, src_hint = fetch_readme(self.repo_url)
         except Exception as e:
             self.text_ready.emit("", "", f"获取 README 失败：{e}")
             return
@@ -1572,6 +1790,8 @@ class _ReadmeWorker(QThread):
         try:
             images = fetch_readme_images(
                 _collect_remote_images(text, base),
+                repo_url=self.repo_url,
+                preferred_source=_source_tag_of(src_hint),
                 on_each=lambda k, img: self.image_ready.emit(k, img))
         except Exception:
             images = {}
