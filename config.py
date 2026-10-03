@@ -67,6 +67,25 @@ MODLINKS_FRESH_URLS = [
     "https://raw.gitmirror.com/mioshk/KnightModder/main/ModLinksCN.xml",
 ]
 
+def repo_file_sources(path: str) -> list[str]:
+    """任意仓库内文件的多源列表：与 load_from_url 完全统一的容灾顺序——
+
+    实时源（ghproxy / raw / gitmirror，直接反代 GitHub raw、不经 CDN 缓存）优先，
+    全部失败再回退 jsDelivr 等 CDN 源兜底。供「关于 / 使用教程 / 检查更新」复用，
+    确保它们和 Mod 链接刷新走完全相同的机制（先实时源、抓不到再 jsDelivr）。
+    """
+    fresh = [
+        f"https://ghproxy.net/https://raw.githubusercontent.com/mioshk/KnightModder/refs/heads/main/{path}",
+        f"{GH_RAW_BASE}/{path}",
+        f"https://raw.gitmirror.com/mioshk/KnightModder/main/{path}",
+    ]
+    jsd = [
+        f"https://fastly.jsdelivr.net/gh/mioshk/KnightModder@main/{path}",
+        f"https://gcore.jsdelivr.net/gh/mioshk/KnightModder@main/{path}",
+        f"https://cdn.jsdelivr.net/gh/mioshk/KnightModder@main/{path}",
+    ]
+    return fresh + jsd
+
 # Markdown 文档（关于 / 使用教程）
 README_URL_CDN = f"{GH_CDN_BASE}/README.md"
 README_URL_RAW = f"{GH_RAW_BASE}/README.md"

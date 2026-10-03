@@ -506,6 +506,36 @@ def fetch_remote_content(cdn_url, raw_url, timeout=10, ssl_warn_callback=None):
     return raw_content, "github-raw"
 
 
+def fetch_repo_file(path: str, timeout: int = 10, progress_callback=None):
+    """统一多源读取仓库内某文件：实时源优先，jsDelivr 兜底（与 Mod 链接刷新机制一致）。
+
+    按 config.repo_file_sources(path) 顺序逐一尝试，谁先返回 200 用谁；
+    全部失败返回 (None, "")。供「关于 / 使用教程 / 检查更新」复用。
+
+    :param path: 仓库内相对路径，如 "version.json" / "README.md" / "USAGE.md"
+    :param progress_callback: 可选进度回调 (msg, level)
+    :return: (content_bytes, source_url)；source_url 为空表示全部失败
+    """
+    from config import repo_file_sources
+    from urllib.parse import urlparse
+    for u in repo_file_sources(path):
+        try:
+            if progress_callback:
+                try:
+                    host = urlparse(u).netloc
+                except Exception:  # noqa: BLE001
+                    host = u
+                progress_callback(f"🔍 正在从 {host} 获取 {path}...", "info")
+            net_debug_log(f"[fetch:{path}] 尝试 {u}")
+            resp = safe_requests_get(u, timeout=timeout)
+            if resp.status_code == 200:
+                net_debug_log(f"[fetch:{path}] 成功 {u} ({len(resp.content)} 字节)")
+                return resp.content, u
+        except Exception as e:  # noqa: BLE001 单个源失败不致命，换下一个
+            net_debug_log(f"[fetch:{path}] 失败 {u}: {type(e).__name__}: {e}")
+    return None, ""
+
+
 # ============================================================
 # Unity 单实例 Mutex 探测（Hollow Knight 单实例机制）
 # ============================================================

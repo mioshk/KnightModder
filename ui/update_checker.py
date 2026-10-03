@@ -8,8 +8,8 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QMessageBox, QProgressBar, QWidget, QScrollArea,
 )
-from config import APP_VERSION, UPDATE_CHECK_URL_CDN, UPDATE_CHECK_URL_RAW
-from utils.common import safe_requests_get, fetch_remote_content, get_asset_path
+from config import APP_VERSION
+from utils.common import safe_requests_get, fetch_repo_file, get_asset_path
 
 
 # ==================== 全局状态 ====================
@@ -25,13 +25,12 @@ class UpdateChecker(QThread):
 
     def __init__(self):
         super().__init__()
-        self.url_cdn = UPDATE_CHECK_URL_CDN
-        self.url_raw = UPDATE_CHECK_URL_RAW
 
     def run(self):
         from packaging.version import parse as parse_version  # 延迟导入
         try:
-            content, _ = fetch_remote_content(self.url_cdn, self.url_raw, timeout=10)
+            # 统一机制：实时源（ghproxy/raw/gitmirror）优先，jsDelivr 兜底
+            content, _ = fetch_repo_file("version.json", timeout=10)
             if content is None:
                 self.finished.emit(False, {}, "网络请求失败")
                 return

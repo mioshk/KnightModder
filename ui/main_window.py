@@ -27,8 +27,6 @@ from PySide6.QtWidgets import (
 )
 from config import (
     APP_NAME,
-    USAGE_URL_CDN,
-    USAGE_URL_RAW,
     STEAM_APPID,
     STEAM_RUN_URL,
 )
@@ -733,11 +731,11 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _show_about_md(self):
-        dialog = AboutMarkdownDialog(self)
+        dialog = AboutMarkdownDialog(self, repo_path="README.md", title="关于")
         dialog.exec()
 
     def _show_usage_md(self):
-        dialog = AboutMarkdownDialog(self, url=USAGE_URL_CDN, url_raw=USAGE_URL_RAW, title="使用教程")
+        dialog = AboutMarkdownDialog(self, repo_path="USAGE.md", title="使用教程")
         dialog.exec()
 
     def _create_nav_bar(self):
@@ -1799,22 +1797,23 @@ class MainWindow(QMainWindow):
     def _refresh_dependency_task(self):
         """后台刷新 Mod 数据，成功则通知 UI 更新（失败保留缓存）。
 
-        用 bust_cache=True 走实时源：否则后台刷新会打 fastly 等 CDN 缓存源、拿到旧数据
-        又把本地缓存覆盖回去，导致「手动更新拿到最新 → 重启又被 CDN 旧数据打回」的倒退。
+        与「更新链接」按钮走完全相同的 load_from_url：实时源优先做一致性检查，
+        jsDelivr 仅兜底且不覆盖已更新的本地缓存，故不会出现「手动更新拿到最新 →
+        重启又被 CDN 旧数据打回」的倒退。
         """
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(progress_callback=self._log, bust_cache=True)
+                success = self.resolver.load_from_url(progress_callback=self._log)
         except Exception as e:
             self._log(f"后台刷新 Mod 数据异常: {e}", "error")
             success = False
         if success:
             if self.resolver._last_fetch_changed:
-                self._log("✅ 后台刷新完成，Mod 数据已是最新", "success")
+                self._log(f"✅ 后台刷新完成，Mod 数据已是最新（共 {len(self.resolver.mod_data)} 个 Mod）", "success")
                 self.dependency_done.emit(True)
             else:
                 # 线上与本地缓存一致：不重建 UI，直接复用缓存（更快）
-                self._log("✅ Mod 数据已是最新（与本地缓存一致，无需更新）", "info")
+                self._log(f"✅ Mod 数据已是最新（共 {len(self.resolver.mod_data)} 个 Mod，与本地缓存一致，无需更新）", "info")
 
     def _on_load_finished(self, success):
         try:
@@ -1838,10 +1837,14 @@ class MainWindow(QMainWindow):
         threading.Thread(target=self._reload_dependency_task, daemon=True).start()
 
     def _reload_dependency_task(self):
-        """手动刷新任务：必须走网络，忽略本地缓存；并击穿 CDN 缓存拿最新数据"""
+        """手动「更新链接」：与启动后台刷新走完全相同的 load_from_url 统一机制。
+
+        实时源（ghproxy/raw/gitmirror，无 CDN 缓存）优先做一致性检查——内容变了就拉最新
+        到本地缓存，没变就复用本地；实时源全挂才回退 jsDelivr 兜底（且不覆盖已有新缓存）。
+        """
         try:
             with self._dependency_lock:
-                success = self.resolver.load_from_url(progress_callback=self._log, bust_cache=True)
+                success = self.resolver.load_from_url(progress_callback=self._log)
         except Exception as e:
             self._log(f"Mod链接加载异常: {e}", "error")
             success = False
@@ -1854,7 +1857,7 @@ class MainWindow(QMainWindow):
                 return
             if success:
                 self.page_online.refresh_mod_list(self.game_path)
-                self._log("✅ Mod 数据已更新至最新", "success")
+                self._log(f"✅ Mod 数据已更新至最新（共 {len(self.resolver.mod_data)} 个 Mod）", "success")
             else:
                 self._log("❌ Mod 数据更新失败，请检查网络连接后重试", "error")
         except RuntimeError:

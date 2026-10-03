@@ -25,13 +25,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QFont, QIcon
 
-from utils.common import fetch_remote_content, get_asset_path
+from utils.common import fetch_repo_file, get_asset_path
 
 from config import (
     APP_NAME,
     AUTHOR_URL,
-    README_URL_CDN,
-    README_URL_RAW,
     COLOR_ACCENT_BLUE,
     COLOR_ACCENT_RED,
     COLOR_ACCENT_ORANGE,
@@ -157,13 +155,12 @@ def show_path_select_dialog(parent, paths_data):
 
 
 class AboutMarkdownDialog(QDialog):
-    """从远程加载 Markdown 并渲染的对话框（CDN 优先，GitHub raw 兜底）"""
+    """从远程加载 Markdown 并渲染的对话框（实时源优先，jsDelivr 兜底，与 Mod 链接刷新一致）"""
 
-    def __init__(self, parent=None, url=None, url_raw=None, title="关于"):
+    def __init__(self, parent=None, repo_path="README.md", title="关于"):
         super().__init__(parent)
         self.parent = parent
-        self.remote_url = url if url else README_URL_CDN
-        self.remote_raw_url = url_raw if url_raw else README_URL_RAW
+        self.repo_path = repo_path
         self.dialog_title = title
         self.loader = None
         self._setup_ui()
@@ -250,7 +247,7 @@ class AboutMarkdownDialog(QDialog):
         self.content_area.setHtml('<div style="color:#888888; text-align:center; padding:40px 0;">加载中...</div>')
         self.version_label.setText("加载中...")
 
-        self.loader = MdLoader(self.remote_url, self.remote_raw_url)
+        self.loader = MdLoader(self.repo_path)
         self.loader.finished.connect(self._on_content_loaded)
         self.loader.start()
 
@@ -283,17 +280,16 @@ class AboutMarkdownDialog(QDialog):
 
 
 class MdLoader(QThread):
-    """后台线程加载远程 Markdown（CDN 优先，GitHub raw 兜底）"""
+    """后台线程加载远程 Markdown（实时源优先，jsDelivr 兜底，与 Mod 链接刷新一致）"""
     finished = Signal(bool, str)
 
-    def __init__(self, url, url_raw):
+    def __init__(self, path):
         super().__init__()
-        self.url = url
-        self.url_raw = url_raw
+        self.path = path
 
     def run(self):
         try:
-            content, _ = fetch_remote_content(self.url, self.url_raw, timeout=10)
+            content, _ = fetch_repo_file(self.path, timeout=10)
             if content is None:
                 self.finished.emit(False, "")
                 return

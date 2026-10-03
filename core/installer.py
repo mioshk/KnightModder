@@ -832,35 +832,35 @@ class DependencyResolver:
         except OSError:
             pass
 
-    def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None,
-                      bust_cache: bool = False) -> bool:
+    def load_from_url(self, url: Optional[str] = None, progress_callback: Optional[Callable] = None) -> bool:
         """
-        从 URL 加载 Mod 依赖数据。
+        从 URL 加载（并同步本地缓存）Mod 依赖数据。
 
-        默认按 MODLINKS_URLS（jsDelivr + GitHub raw + 多个国内可达镜像）逐一尝试、
-        谁先成功用谁；全部失败才报错。很多大陆用户网络下 jsDelivr / raw.githubusercontent
-        都被墙或超时（本机实测 raw.githubusercontent.com 直接 12s 超时），于是旧版只试这两
-        个源时「更新链接」永远失败——多挂镜像能救回绝大多数。
+        统一机制（启动自动加载与「更新链接」按钮走完全相同的逻辑）：
+          1. 先按 MODLINKS_FRESH_URLS（ghproxy / raw / gitmirror 等直接反代 GitHub raw、
+             不经 CDN 缓存的「实时源」）逐一做一致性检查：
+             - 服务端返回 304，或下载内容与本地缓存 sha256 一致 → 视为「未变化」，
+               不重新写本地、不重建 UI，直接复用本地缓存（秒过）；
+             - 内容变了 → 解析并写入本地缓存（拿到最新）。
+          2. 实时源全部拉取失败 → 才回退 MODLINKS_URLS 里的 jsDelivr / CDN 源兜底。
+             jsDelivr 有 GitHub 缓存、可能返回旧副本，所以仅作为「至少能拉到一份」的最后手段，
+             且**不会用它的（可能更旧的）内容覆盖本地已有的更新缓存**。
 
-        :param url: 自定义单源地址（仍支持，但 UI 暂未暴露）；默认用多源列表
+        为什么不复用 CDN 缓存：jsDelivr 的 shield 层缓存按「仓库+路径」存，给 URL 加 ?_=
+        时间戳只打穿 edge、shield 仍吐旧副本（实测同 etag），所以「即时刷新」只能走实时源。
+
+        :param url: 自定义单源地址（仍支持，但 UI 暂未暴露）；默认用统一多源列表
         :param progress_callback: 进度回调函数
-        :param bust_cache: 是否强制取 GitHub 最新版（手动「更新链接」用）。True 时把
-            MODLINKS_FRESH_URLS（ghproxy / raw / gitmirror 等直接反代 GitHub raw、不经 CDN
-            缓存的实时源）排到最前，先试这些实时源、拿不到再退回 jsDelivr 等 CDN 缓存源兜底。
-            注意：给 jsDelivr 加 ?_= 时间戳打不穿它的 shield 缓存（实测同 etag），所以必须用
-            实时源而非戳。自动加载 / 后台刷新保持 False，照常享受 CDN 加速、不刷爆 GitHub。
         :return: 是否加载成功
         """
         from utils.common import net_debug_log
         if url:
             sources = [url]
-        elif bust_cache:
-            # 手动刷新要最新：实时源（反代 raw，无 CDN 缓存）优先，CDN 源兜底。
+        else:
+            # 统一顺序：实时源优先做一致性检查，全部失败再回退 jsDelivr 等 CDN 源兜底。
             _fresh = list(MODLINKS_FRESH_URLS)
             _rest = [u for u in MODLINKS_URLS if u not in _fresh]
             sources = _fresh + _rest
-        else:
-            sources = list(MODLINKS_URLS)
         first_net_err = None
         last_err = None
         _cached_sha = self._cache_sha256()
@@ -906,7 +906,11 @@ class DependencyResolver:
             if progress_callback:
                 progress_callback("📥 正在解析 Mod 数据...", "info")
             if self._parse_xml_content(content, progress_callback):
-                # 解析成功后才写入本地缓存，避免坏数据覆盖缓存
+                # 解析成功后才写本地缓存（覆盖式）：
+                # 走到这里的 content 已与本地 sha256 不同，无论从实时源还是 jsDelivr 兜底
+                # 拉到，都直接落盘——兜底的本职就是「实时源全挂时至少给一份能用的数据」，
+                # 不能因为它可能偏旧就拒绝覆盖（那样兜底等于死代码）。内容相同的情况在上面的
+                # sha256 比对里已经直接 return、根本到不了这里。
                 self.save_cache(content)
                 _etag = response.headers.get("ETag")
                 if _etag:
