@@ -58,11 +58,21 @@ jobs:
           Get-ChildItem dist -Filter *.exe |
             ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length/1MB) }
 
-      - name: 上传构建产物
+      # 分成两个 artifact，而不是把两个 exe 塞进同一个 zip：
+      # GitHub 的 artifact 一个就是一个 zip，混在一起会让人误以为「只构建了一个」
+      # 且不知道是哪个版本；拆开后各自 ~50MB，名字直接写明安装版 / 绿色版。
+      - name: 上传安装版
         uses: actions/upload-artifact@v4
         with:
-          name: KnightModder-v${{ steps.ver.outputs.version }}
-          path: dist/*.exe
+          name: KnightModder-v${{ steps.ver.outputs.version }}-安装版
+          path: dist/KnightModder v* 安装版.exe
+          if-no-files-found: error
+
+      - name: 上传绿色版
+        uses: actions/upload-artifact@v4
+        with:
+          name: KnightModder-v${{ steps.ver.outputs.version }}-绿色版
+          path: dist/KnightModder v* 绿色版.exe
           if-no-files-found: error
 
       # 只有打 v* 标签时才发 Release，免得每次 push 都生成一个发布版本。
